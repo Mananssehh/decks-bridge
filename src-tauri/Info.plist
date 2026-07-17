@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Opt into dark mode — prevents macOS from forcing light Aqua appearance on WKWebView -->
+  <key>NSRequiresAquaSystemAppearance</key>
+  <false/>
+  <!-- Required so macOS shows a consent prompt and allows Decks Bridge to read
+       Now Playing metadata from Music, Spotify, etc. via AppleScript. Without
+       this key the Apple Events are silently denied under hardened runtime. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Decks Bridge reads the currently playing track from Apple Music, Spotify, and other players so it can send Now Playing info to your Decks event.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>decksbridge</string>
+      </array>
+      <key>CFBundleURLName</key>
+      <string>com.decksbridge.app</string>
+    </dict>
+  </array>
+</dict>
+</plist>

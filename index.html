@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Force dark colour scheme before any CSS or JS loads -->
+    <meta name="color-scheme" content="dark" />
+    <title>Decks Bridge</title>
+    <style>
+      /* Inline critical styles — zero-latency dark background before Vite CSS loads */
+      html, body, #root {
+        background: #0e0e10 !important;
+        color: #f0f0f0;
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        color-scheme: dark;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

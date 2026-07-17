@@ -1,0 +1,38 @@
+{
+  "name": "decks-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/check-no-mock.mjs && tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:build": "tauri build && bash scripts/fix-macos-plist.sh",
+    "build:release": "bash scripts/build-release.sh",
+    "build:release:aarch64": "bash scripts/build-release.sh aarch64-apple-darwin",
+    "build:internal": "bash scripts/build-internal.sh",
+    "build:internal:aarch64": "bash scripts/build-internal.sh aarch64-apple-darwin",
+    "build:internal:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-internal-windows.ps1",
+    "sync:testers": "bash scripts/sync-tester-folders.sh",
+    "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-autostart": "^2.3.1",
+    "@tauri-apps/plugin-deep-link": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.8"
+  }
+}

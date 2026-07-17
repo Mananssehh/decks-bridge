@@ -1,0 +1,79 @@
+/* ── Decks design tokens — SINGLE SOURCE OF TRUTH ────────────────────────────
+ *
+ * The Live Event Console established the product's visual language. These tokens
+ * lift that language out of viewer.css so the main Bridge window and the viewer
+ * surfaces share ONE theme instead of drifting apart.
+ *
+ * ADDITIVE BY DESIGN: legacy names in index.css (--surface, --border, --radius,
+ * --text-muted …) are intentionally NOT redefined here. Older screens
+ * (PairingScreen / SetupScreen / DiagnosticsPanel) still consume those, and
+ * silently retheming them from here would change surfaces nobody reviewed.
+ * New/redesigned surfaces use the canonical names below; legacy screens can be
+ * migrated onto them deliberately, one at a time.
+ *
+ * Consumed by: bridge.css (main window), viewer.css (console / mini / pill).
+ */
+
+:root {
+  /* Base ---------------------------------------------------------------- */
+  /* Signature ambient wash: violet top-left, purple top-right, on near-black. */
+  --app-bg:
+    radial-gradient(1200px 600px at 15% -10%, rgba(108, 99, 255, 0.14), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(168, 85, 247, 0.10), transparent 55%),
+    #0b0b0d;
+  --app-bg-solid: #0b0b0d;
+
+  /* Glass surfaces — translucent over the wash, never flat gray ----------- */
+  --glass: rgba(255, 255, 255, 0.035);
+  --glass-2: rgba(255, 255, 255, 0.04);
+  --glass-hover: rgba(255, 255, 255, 0.1);
+  --hairline: rgba(255, 255, 255, 0.07);
+  --hairline-strong: rgba(255, 255, 255, 0.08);
+
+  /* Type ---------------------------------------------------------------- */
+  --text-2: #b6b6be;
+  --text-dim: #9a9aa3;
+  --text-soft: #8a8a93;
+
+  /* Accents -------------------------------------------------------------- */
+  --accent-2: #a855f7;
+  --accent-grad: linear-gradient(135deg, #6c63ff, #a855f7);
+
+  /* Semantic states ------------------------------------------------------ */
+  --green: #22c55e;
+  --gold: #f5c451;
+  --amber: #f59e0b;
+  --red: #ef6a6a;
+
+  /* Shape ---------------------------------------------------------------- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  /* Depth ---------------------------------------------------------------- */
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --shadow-accent: 0 6px 18px rgba(108, 99, 255, 0.35);
+  --glow-accent: 0 0 12px rgba(108, 99, 255, 0.6);
+
+  /* Spacing scale -------------------------------------------------------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 22px;
+  --sp-6: 30px;
+
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+}
+
+/* Respect the OS reduced-motion setting (ambient waveform, transitions). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

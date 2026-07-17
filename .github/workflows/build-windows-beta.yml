@@ -1,0 +1,43 @@
+name: Build Windows Beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_note:
+        description: "Optional build note (e.g. 'DJ beta 01')"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows internal (unsigned)
+        shell: pwsh
+        run: npm run build:internal:windows
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-beta
+          path: |
+            release/windows/Decks Bridge Setup.exe
+            release/windows/Decks Bridge Portable.exe
+            release/windows/Decks Bridge.zip
+          if-no-files-found: error
+          retention-days: 30
