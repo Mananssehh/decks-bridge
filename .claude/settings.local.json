@@ -87,7 +87,8 @@
       "Bash(cp src/lib/offlineQueue.ts /tmp/oq-fixed.bak)",
       "Bash(python3 -)",
       "Bash(echo \"typecheck=$?\")",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(grep -rnE \"console\\\\.\\(log|error|warn\\).*bodyText|console\\\\.\\(log|error\\).*\\\\bresult\\\\b\\\\s*\\\\\\)|codeSent: code\\\\b|payload,$\" src/lib/pair.ts src/components/PairingScreen.tsx)"
     ]
   }
 }

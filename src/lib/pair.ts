@@ -18,6 +18,36 @@ export interface PairDebug {
   body: string;
 }
 
+/**
+ * Strip secrets from a pairing response before it can reach a console, the
+ * on-disk diagnostic log, or the debug panel.
+ *
+ * The bridge-pair success body carries `ingest_token` — the DJ's long-lived
+ * credential for their event. It was previously logged verbatim, so anyone
+ * with the log had the token.
+ */
+export function redactBody(body: string): string {
+  if (!body) return body;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object") return body;
+    const o = parsed as Record<string, unknown>;
+    for (const k of Object.keys(o)) {
+      if (/token|secret|password|key|authorization/i.test(k)) o[k] = "(redacted)";
+    }
+    return JSON.stringify(o);
+  } catch {
+    // Not JSON — most likely an HTML error page. Truncate rather than echo an
+    // unbounded body we haven't inspected.
+    return body.length > 200 ? `${body.slice(0, 200)}…(truncated)` : body;
+  }
+}
+
+/** A pairing code is a single-use credential; never write it out in full. */
+function redactCode(code: string): string {
+  return `${"•".repeat(Math.max(0, code.length - 2))}${code.slice(-2)}`;
+}
+
 function mapError(status: number, body: string): string {
   const lower = body.toLowerCase();
   if (lower.includes("expired")) return "This pairing code has expired. Generate a new one from your event dashboard.";
@@ -33,9 +63,10 @@ export async function pairWithCode(code: string): Promise<PairResult> {
   const payload = JSON.stringify({ code });
 
   console.log("[bridge-pair] →", PAIR_URL);
-  console.log("[bridge-pair] code:", code, "| payload:", payload);
   const { logDiagnostic } = await import("./log");
-  await logDiagnostic("pairing", `bridge-pair POST code=${code}`);
+  // The code is a single-use credential and logDiagnostic writes to a file on
+  // disk that support may be sent — never record it in full.
+  await logDiagnostic("pairing", `bridge-pair POST code=${redactCode(code)}`);
 
   try {
     const res = await fetch(PAIR_URL, {
@@ -47,14 +78,16 @@ export async function pairWithCode(code: string): Promise<PairResult> {
     status = res.status;
     bodyText = await res.text().catch(() => "");
 
-    console.log("[bridge-pair] ←", status, bodyText);
+    console.log("[bridge-pair] ←", status, redactBody(bodyText));
 
+    // debug is surfaced to the UI/console, so it must never carry the token or
+    // the raw code — the success body contains ingest_token.
     const debug: PairDebug = {
       url: PAIR_URL,
-      codeSent: code,
-      payload,
+      codeSent: redactCode(code),
+      payload: redactBody(payload),
       status,
-      body: bodyText,
+      body: redactBody(bodyText),
     };
 
     if (!res.ok) {
@@ -68,8 +101,8 @@ export async function pairWithCode(code: string): Promise<PairResult> {
     try {
       data = JSON.parse(bodyText) as Record<string, string>;
     } catch {
-      console.error("[bridge-pair] JSON parse failed on 200 body:", bodyText);
-      return { ok: false, error: "Unexpected server response. Try again.", debug: { url: PAIR_URL, codeSent: code, payload, status, body: bodyText } };
+      console.error("[bridge-pair] JSON parse failed on 200 body:", redactBody(bodyText));
+      return { ok: false, error: "Unexpected server response. Try again.", debug };
     }
 
     // Normalise the ingest URL: use whatever the server returns if it looks like
@@ -90,7 +123,13 @@ export async function pairWithCode(code: string): Promise<PairResult> {
     return { ok: true, config, debug };
   } catch (err) {
     console.error("[bridge-pair] fetch error:", err);
-    const debug: PairDebug = { url: PAIR_URL, codeSent: code, payload, status, body: bodyText };
+    const debug: PairDebug = {
+      url: PAIR_URL,
+      codeSent: redactCode(code),
+      payload: redactBody(payload),
+      status,
+      body: redactBody(bodyText),
+    };
     return { ok: false, error: mapError(0, ""), debug };
   }
 }
