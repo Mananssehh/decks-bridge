@@ -92,7 +92,8 @@
       "Bash(bash -n scripts/package-artifacts.sh)",
       "Bash(command -v shellcheck)",
       "Bash(shellcheck scripts/package-artifacts.sh)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(grep -v \"^\\\\s*$\")"
     ]
   }
 }
