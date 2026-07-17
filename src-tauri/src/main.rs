@@ -631,50 +631,61 @@ pub fn detect() -> NowPlayingTrack {
 /// process list — it only collapses the burst of lookups *within* a single
 /// detect into one spawn. Process state cannot meaningfully change inside that
 /// window given detection is already sampled every 3s.
+/// Run `f` against the cached process-name list, refreshing it if stale.
+///
+/// Takes a closure rather than returning the Vec so callers borrow the cached
+/// list instead of cloning it: detect() asks about ~10 apps per poll, and
+/// cloning a ~500-entry Vec<String> each time would trade the fork/exec we just
+/// removed for thousands of allocations per poll.
 #[cfg(target_os = "macos")]
-fn process_names() -> Vec<String> {
+fn with_process_names<R>(f: impl FnOnce(&[String]) -> R) -> R {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_millis(1_000);
 
+    // Poisoning is recovered rather than unwrapped: a stale process list is
+    // never a reason to crash the app mid-set.
     let mut guard = match CACHE.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some((at, names)) = guard.as_ref() {
-        if at.elapsed() < TTL {
-            return names.clone();
-        }
+
+    let fresh = guard
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < TTL);
+
+    if !fresh {
+        // -A all processes, -c the executable name only (no args, no path),
+        // -o comm= suppresses the header. Verified against `pgrep -xi` on the
+        // live process table: preserves names containing spaces ("Serato DJ
+        // Pro") and does not truncate.
+        let names: Vec<String> = std::process::Command::new("ps")
+            .args(["-Ac", "-o", "comm="])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        *guard = Some((Instant::now(), names));
     }
 
-    // -A all processes, -c the executable name only (no args, no path), -o comm=
-    // suppresses the header. Verified to preserve names containing spaces
-    // ("Serato DJ Pro") and not to truncate.
-    let names: Vec<String> = std::process::Command::new("ps")
-        .args(["-Ac", "-o", "comm="])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    *guard = Some((Instant::now(), names.clone()));
-    names
+    match guard.as_ref() {
+        Some((_, names)) => f(names),
+        None => f(&[]),
+    }
 }
 
 /// Returns true if `process_name` is currently in the macOS process list.
 /// Matches the previous `pgrep -xi` semantics: exact name, case-insensitive.
 #[cfg(target_os = "macos")]
 fn is_process_running(process_name: &str) -> bool {
-    process_names()
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case(process_name))
+    with_process_names(|names| names.iter().any(|n| n.eq_ignore_ascii_case(process_name)))
 }
 
 /// Returns the running djay process name, or None if djay is not open.
