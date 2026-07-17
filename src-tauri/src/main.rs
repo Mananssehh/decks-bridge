@@ -78,19 +78,27 @@ pub struct NowPlayingTrack {
 // ── macOS version + Automation-permission helpers ─────────────────────────────
 
 /// Returns the macOS product version as (major, minor), e.g. (15, 6).
+///
+/// Cached for the process lifetime: the OS version cannot change while we are
+/// running, but this used to fork `sw_vers` on every call — and read_media_remote
+/// calls it twice per detect, i.e. every 3 seconds for the whole set.
 #[cfg(target_os = "macos")]
 fn macos_version() -> (u32, u32) {
-    let out = std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output();
-    if let Ok(o) = out {
-        let s = String::from_utf8_lossy(&o.stdout);
-        let mut parts = s.trim().split('.');
-        let major = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        return (major, minor);
-    }
-    (0, 0)
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<(u32, u32)> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let out = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let mut parts = s.trim().split('.');
+            let major = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let minor = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            return (major, minor);
+        }
+        (0, 0)
+    })
 }
 
 /// True on macOS 15.4+ where Apple restricts the private MediaRemote framework's
@@ -612,14 +620,61 @@ pub fn detect() -> NowPlayingTrack {
 
 // ── Process helpers ───────────────────────────────────────────────────────────
 
+/// Snapshot of running process names, cached briefly.
+///
+/// detect() asks about six or more apps per poll, and each question used to
+/// fork+exec its own `pgrep`. At a 3s poll for a four-hour set that is tens of
+/// thousands of process spawns on a machine that is also running a DJ rig. One
+/// `ps` answers every question instead.
+///
+/// The TTL is well under the poll interval, so each detect still sees a fresh
+/// process list — it only collapses the burst of lookups *within* a single
+/// detect into one spawn. Process state cannot meaningfully change inside that
+/// window given detection is already sampled every 3s.
+#[cfg(target_os = "macos")]
+fn process_names() -> Vec<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_millis(1_000);
+
+    let mut guard = match CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((at, names)) = guard.as_ref() {
+        if at.elapsed() < TTL {
+            return names.clone();
+        }
+    }
+
+    // -A all processes, -c the executable name only (no args, no path), -o comm=
+    // suppresses the header. Verified to preserve names containing spaces
+    // ("Serato DJ Pro") and not to truncate.
+    let names: Vec<String> = std::process::Command::new("ps")
+        .args(["-Ac", "-o", "comm="])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    *guard = Some((Instant::now(), names.clone()));
+    names
+}
+
 /// Returns true if `process_name` is currently in the macOS process list.
+/// Matches the previous `pgrep -xi` semantics: exact name, case-insensitive.
 #[cfg(target_os = "macos")]
 fn is_process_running(process_name: &str) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-xi", process_name]) // -x = exact match, -i = case-insensitive
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    process_names()
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(process_name))
 }
 
 /// Returns the running djay process name, or None if djay is not open.
