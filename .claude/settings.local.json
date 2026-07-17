@@ -80,7 +80,8 @@
       "Bash(mdfind -onlyin ~/.Trash \"Decks\")",
       "Bash(echo \"exit=$?\")",
       "Bash(grep -rniE 'PRIVATE KEY|BEGIN RSA|BEGIN OPENSSH|password.*=.*['\\\\''\"][^'\\\\''\"]{8,}|secret.*=.*['\\\\''\"][^'\\\\''\"]{8,}' src scripts src-tauri/src *.json *.md)",
-      "Bash(echo \"exit=$? \\(0/empty = PASS ✓\\)\")"
+      "Bash(echo \"exit=$? \\(0/empty = PASS ✓\\)\")",
+      "Bash(grep -A1 '^name = \"tauri\"$' Cargo.lock)"
     ]
   }
 }

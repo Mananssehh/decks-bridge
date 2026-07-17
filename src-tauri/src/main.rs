@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::Emitter;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Manager;
 #[cfg(target_os = "windows")]
 use tauri::{
@@ -2771,7 +2771,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+/// Bring the main window back: Windows tray "Show"/left-click, macOS Dock click.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -2888,11 +2889,26 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            #[cfg(target_os = "windows")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // ONLY the main window is hidden instead of destroyed.
+                //
+                // Viewer windows must really close: windows.rs/windows.ts closes
+                // one and waits for it to disappear before creating its
+                // replacement, so intercepting their close would leave the
+                // window alive-but-hidden, hang that wait for its full timeout,
+                // and abort the switch. Scoping to "main" keeps the viewer
+                // lifecycle intact on every platform.
+                if window.label() != "main" {
+                    return;
+                }
+
+                // Closing the main window must never kill the DJ's set. Bridge
+                // is a background sync tool: hide the window and keep detecting.
+                // Windows users get it back from the tray; macOS users from the
+                // Dock icon (RunEvent::Reopen below). Cmd+Q / Quit still exits.
                 let _ = window.hide();
                 api.prevent_close();
-                logging::write_line("tray", "window hidden to system tray");
+                logging::write_line("window", "main window hidden — sync continues");
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2907,6 +2923,21 @@ fn main() {
             log_diagnostic,
             get_log_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Decks Bridge");
+        .build(tauri::generate_context!())
+        .expect("error while building Decks Bridge")
+        .run(|_app, _event| {
+            // macOS: the window is hidden rather than destroyed on close (see
+            // on_window_event), so clicking the Dock icon must bring it back —
+            // otherwise a DJ who closed the window has a running, unreachable
+            // app and no tray to recover from.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {
+                // Only restore main when nothing is on screen. If a mini/pill
+                // viewer is up, that IS the DJ's chosen surface and main is
+                // hidden deliberately — don't fight their layout.
+                if !has_visible_windows {
+                    show_main_window(_app);
+                }
+            }
+        });
 }
