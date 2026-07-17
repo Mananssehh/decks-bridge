@@ -83,7 +83,10 @@ export class SyncEngine {
   private detectedRaw: DetectedTrack | null = null;
   private state: SyncState = "stopped";
   private online = typeof navigator !== "undefined" ? navigator.onLine : true;
+  /** Consecutive send failures; indexes BACKOFF_MS. 0 = healthy, no backoff. */
   private backoffIdx = 0;
+  /** Epoch ms before which no automatic send is attempted. 0 = send freely. */
+  private nextSendAt = 0;
 
   onStatus: ((s: SyncStatus) => void) | null = null;
   onIngest: ((ok: boolean) => void) | null = null;
@@ -142,7 +145,7 @@ export class SyncEngine {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.backoffIdx = 0;
+    this.clearBackoff();
     this.online = typeof navigator !== "undefined" ? navigator.onLine : true;
     if (typeof window !== "undefined") {
       window.addEventListener("online", this.handleOnline);
@@ -189,10 +192,17 @@ export class SyncEngine {
     this.detectedRaw = null;
   }
 
+  /** Clear the send backoff. Both fields must move together: leaving nextSendAt
+   *  set after a reset would keep holding sends off despite a healthy link. */
+  private clearBackoff(): void {
+    this.backoffIdx = 0;
+    this.nextSendAt = 0;
+  }
+
   // ── Network transitions ───────────────────────────────────────────────────
   private handleOnline = (): void => {
     this.online = true;
-    this.backoffIdx = 0;
+    this.clearBackoff();
     this.log("[net] back online — resyncing latest track");
     this.emit();
     this.syncNow("reconnect");
@@ -206,7 +216,7 @@ export class SyncEngine {
 
   /** Called by the connection layer when a Supabase ping recovers. */
   notifyReconnected(): void {
-    this.backoffIdx = 0;
+    this.clearBackoff();
     if (this.running) this.syncNow("reconnect");
   }
 
@@ -316,20 +326,46 @@ export class SyncEngine {
         detectedAt: Date.now(),
         sentAt: null,
       };
-      await this.send(track, title, artist, "new");
+      await this.maybeSend(track, title, artist, "new", force);
     } else if (force) {
       this.log(`[sync-now] resending "${title}" / "${artist}"`);
-      await this.send(track, title, artist, "sync-now");
+      // A DJ pressing Sync Now is an explicit instruction — bypass the backoff.
+      await this.maybeSend(track, title, artist, "sync-now", true);
     } else if (prevUnsent) {
       this.log(`[retry] previous send did not confirm — resending "${title}"`);
-      await this.send(track, title, artist, "retry");
+      await this.maybeSend(track, title, artist, "retry", false);
     } else if (heartbeatDue) {
       this.log(`[heartbeat] 30s resync "${title}" / "${artist}"`);
-      await this.send(track, title, artist, "heartbeat");
+      await this.maybeSend(track, title, artist, "heartbeat", false);
     } else {
       this.log(`[skip] duplicate "${title}" / "${artist}"`);
       this.state = "active";
     }
+  }
+
+  /**
+   * Send unless the failure backoff is still holding us off.
+   *
+   * Detection keeps running at POLL_MS so the UI stays live and local-only
+   * state is accurate; it is only the network send that backs off. Skipping
+   * leaves `sentAt` null, so the existing prevUnsent path retries the track as
+   * soon as the window expires — nothing is lost by waiting.
+   */
+  private async maybeSend(
+    track: DetectedTrack,
+    title: string,
+    artist: string,
+    reason: Reason,
+    bypassBackoff: boolean
+  ): Promise<void> {
+    if (!bypassBackoff && this.nextSendAt > 0 && Date.now() < this.nextSendAt) {
+      const waitS = Math.ceil((this.nextSendAt - Date.now()) / 1000);
+      this.log(
+        `[backoff] holding ${reason} send ~${waitS}s (${this.backoffIdx} consecutive failure(s))`
+      );
+      return;
+    }
+    await this.send(track, title, artist, reason);
   }
 
   private async send(track: DetectedTrack, title: string, artist: string, reason: Reason): Promise<void> {
@@ -344,12 +380,20 @@ export class SyncEngine {
     const normKey = `${normalize(title)} || ${normalize(artist)}`;
     if (result.ok) {
       if (this.last && this.last.normKey === normKey) this.last.sentAt = Date.now();
-      this.backoffIdx = 0;
+      this.clearBackoff();
       this.log(`[send] success (${reason})`);
     } else {
-      // Leave sentAt = null so the next tick retries (prevUnsent path).
-      this.backoffIdx = Math.min(this.backoffIdx + 1, BACKOFF_MS.length - 1);
-      this.log(`[send] failed (${reason}) status=${result.httpStatus} — will retry`);
+      // Leave sentAt = null so the next tick retries (prevUnsent path), and
+      // hold that retry off for the next backoff step. Without this the loop
+      // retried every POLL_MS (3s) forever: with thousands of DJs running
+      // Bridge, a backend blip would become a sustained 3s-interval stampede
+      // from every client at once, exactly when it can least take the load.
+      const delay = BACKOFF_MS[Math.min(this.backoffIdx, BACKOFF_MS.length - 1)];
+      this.backoffIdx += 1;
+      this.nextSendAt = Date.now() + delay;
+      this.log(
+        `[send] failed (${reason}) status=${result.httpStatus} — retrying in ${delay / 1000}s`
+      );
     }
     this.onIngest?.(result.ok);
     this.state = "active";
