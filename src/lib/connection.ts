@@ -1,4 +1,4 @@
-import type { Config } from "./store";
+import { INGEST_FALLBACK, type Config } from "./store";
 import type { DetectedTrack } from "./playback";
 
 export type ConnectionStatus = "connected" | "waiting_dj" | "disconnected";
@@ -9,9 +9,6 @@ export interface PingResult {
   httpStatus: number;
   authFailed: boolean;
 }
-
-const INGEST_FALLBACK =
-  "https://rwdgnapajxcxktmewlxb.supabase.co/functions/v1/now-playing-ingest";
 
 export async function pingSupabase(config: Config): Promise<PingResult> {
   const url =

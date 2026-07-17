@@ -1,4 +1,4 @@
-import { type Config } from "./store";
+import { INGEST_FALLBACK, type Config } from "./store";
 
 const PAIR_URL =
   "https://rwdgnapajxcxktmewlxb.supabase.co/functions/v1/bridge-pair";
@@ -74,8 +74,6 @@ export async function pairWithCode(code: string): Promise<PairResult> {
 
     // Normalise the ingest URL: use whatever the server returns if it looks like
     // a complete HTTPS URL, otherwise fall back to the known-good endpoint.
-    const INGEST_FALLBACK =
-      "https://rwdgnapajxcxktmewlxb.supabase.co/functions/v1/now-playing-ingest";
     const rawUrl = data.endpoint_url ?? "";
     const ingestUrl = rawUrl.startsWith("https://") ? rawUrl : INGEST_FALLBACK;
 

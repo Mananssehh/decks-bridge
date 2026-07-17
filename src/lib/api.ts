@@ -1,7 +1,4 @@
-import { type Config } from "./store";
-
-const INGEST_FALLBACK =
-  "https://rwdgnapajxcxktmewlxb.supabase.co/functions/v1/now-playing-ingest";
+import { type Config, INGEST_FALLBACK } from "./store";
 
 export async function sendHeartbeat(config: Config): Promise<void> {
   const url =
