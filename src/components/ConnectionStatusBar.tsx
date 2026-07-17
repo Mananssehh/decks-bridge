@@ -31,6 +31,9 @@ export default function ConnectionStatusBar({
 }: Props) {
   const meta = STATUS_META[status];
   const source = resolveSourceLabel(detected, manualMode);
+  // In manual mode nothing is being detected, so the generic "No track detected"
+  // headline would misdescribe the state. Everything else uses the status label.
+  const label = manualMode && status === "waiting_dj" ? "Manual mode" : meta.label;
 
   return (
     <div
@@ -51,7 +54,7 @@ export default function ConnectionStatusBar({
         }}
       >
         <span style={{ fontWeight: 600, color: meta.color }}>
-          {meta.emoji} {meta.label}
+          {meta.emoji} {label}
         </span>
         {queuedCount > 0 && (
           <span style={{ color: "var(--text-muted)", fontSize: 11 }}>

@@ -74,7 +74,11 @@ export function deriveConnectionStatus(opts: {
     if (!hasTrack && !lastIngestOk) {
       return { status: "waiting_dj", message: "No track detected" };
     }
+    return { status: "connected", message: "Connected to Decks" };
   }
 
-  return { status: "connected", message: "Connected to Decks" };
+  // Manual mode: the link to Decks is healthy, but nothing is being detected or
+  // sent automatically. Saying "Connected to Decks" here would imply the set is
+  // being tracked when it is not — report the reachable-but-idle state honestly.
+  return { status: "waiting_dj", message: "Manual mode — tracks are not sent automatically" };
 }

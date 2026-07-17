@@ -30,7 +30,7 @@ import { isEnabled } from "@tauri-apps/plugin-autostart";
 interface Props {
   config: Config;
   onReset: () => void;
-  autoStart?: boolean;
+  /** After a previous crash: start in manual and let the DJ re-enable detection. */
   safeMode?: boolean;
 }
 
@@ -47,15 +47,15 @@ interface LastPost {
   trackTitle: string;
 }
 
-export default function NowPlaying({ config, onReset, autoStart = false, safeMode = false }: Props) {
+export default function NowPlaying({ config, onReset, safeMode = false }: Props) {
   // Now Playing source: "auto" (priority pipeline) / a forced app / "manual".
-  // Safe mode forces manual; otherwise honor the saved preference, but only
-  // start detecting automatically when autoStart is set.
+  // The saved preference is the single source of truth for whether detection
+  // runs — "manual" IS the off state — so a DJ who paired on Auto gets Auto back
+  // on every launch. Safe mode is the one override: after a crash we start in
+  // manual and let the DJ turn detection back on deliberately.
   const [source, setSourceState] = useState<NowPlayingSource>(() => {
     if (safeMode) return "manual";
-    const saved = loadNowPlayingSource();
-    if (!autoStart && saved === "auto") return "manual";
-    return saved;
+    return loadNowPlayingSource();
   });
   const autoDetect = source !== "manual";
 
