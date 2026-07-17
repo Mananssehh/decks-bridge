@@ -12,7 +12,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate the whole release on the test suite. Without this, a tag push would
+  # sign, notarize and publish a build that nothing had verified — the tests
+  # only protect the product if they can actually block a release.
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --bin decks-bridge
+
+      - name: Frontend build (includes the mock-data guard)
+        run: npm run build
+
   build-macos:
+    needs: verify
     strategy:
       matrix:
         include:
@@ -90,6 +122,7 @@ jobs:
           if-no-files-found: warn
 
   build-windows:
+    needs: verify
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

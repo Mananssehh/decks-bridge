@@ -88,7 +88,11 @@
       "Bash(python3 -)",
       "Bash(echo \"typecheck=$?\")",
       "Bash(npm test *)",
-      "Bash(grep -rnE \"console\\\\.\\(log|error|warn\\).*bodyText|console\\\\.\\(log|error\\).*\\\\bresult\\\\b\\\\s*\\\\\\)|codeSent: code\\\\b|payload,$\" src/lib/pair.ts src/components/PairingScreen.tsx)"
+      "Bash(grep -rnE \"console\\\\.\\(log|error|warn\\).*bodyText|console\\\\.\\(log|error\\).*\\\\bresult\\\\b\\\\s*\\\\\\)|codeSent: code\\\\b|payload,$\" src/lib/pair.ts src/components/PairingScreen.tsx)",
+      "Bash(bash -n scripts/package-artifacts.sh)",
+      "Bash(command -v shellcheck)",
+      "Bash(shellcheck scripts/package-artifacts.sh)",
+      "Bash(node -e ' *)"
     ]
   }
 }
