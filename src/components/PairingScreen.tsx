@@ -31,9 +31,16 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
     inputRefs.current[Math.max(0, Math.min(5, i))]?.focus();
   }, []);
 
-  // ── Deep-link listener (silent — no UI) ──────────────────────────────────
+  // ── Deep-link listener ────────────────────────────────────────────────────
+  // Keeps the latest triggerConnect reachable without re-registering the
+  // listener. The callback used to close over the FIRST render's
+  // triggerConnect, so its `busy` guard was permanently the initial `false` —
+  // a deep link arriving mid-pair fired a second concurrent pairWithCode.
+  const triggerConnectRef = useRef<(c: string) => void>(() => {});
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
 
     onOpenUrl((urls) => {
       for (const url of urls) {
@@ -41,16 +48,27 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
         if (match) {
           const incoming = match[1];
           setDigits(incoming.split(""));
-          triggerConnect(incoming);
+          triggerConnectRef.current(incoming);
           break;
         }
       }
     })
-      .then((fn) => { unlisten = fn; })
+      .then((fn) => {
+        // If we unmounted while onOpenUrl was still resolving, the old cleanup
+        // ran with unlisten still null and the listener was never removed —
+        // it leaked and then fired setState on an unmounted component.
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
       .catch(() => {});
 
-    return () => { unlisten?.(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   // ── Connect ───────────────────────────────────────────────────────────────
@@ -83,6 +101,10 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
     setStatus({ kind: "connected", config: result.config });
     setTimeout(() => onPaired(result.config!), 900);
   }
+
+  // Keep the deep-link listener pointed at the current closure (same idiom as
+  // syncNowRef in NowPlaying) so its `busy` guard reflects live state.
+  triggerConnectRef.current = triggerConnect;
 
   function handleConnect() {
     triggerConnect(code);

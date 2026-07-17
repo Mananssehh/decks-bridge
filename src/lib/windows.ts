@@ -156,8 +156,24 @@ async function persistGeomNow(win: TWebviewWindow, key: string): Promise<void> {
   }
 }
 
+/**
+ * Detach fns for the geometry listeners currently attached, keyed by geom key.
+ *
+ * Needed because trackGeometry can legitimately be called more than once for
+ * the same surface: applyConsoleWindow runs from an effect that re-fires on
+ * screen/config changes, and a viewer can be closed and reopened.
+ */
+const geometryUnlisten = new Map<string, () => void>();
+
 /** Attach move/resize listeners that persist geometry (best-effort, debounced). */
 async function trackGeometry(win: TWebviewWindow, key: string): Promise<void> {
+  // Detach whatever is already attached for this key first. Tauri's onMoved /
+  // onResized return unlisten fns that were previously discarded, so every
+  // re-run stacked another pair on the same window — permanently. Each window
+  // move then fired N debounced persists (N IPC round-trips + N localStorage
+  // writes), growing for as long as the app stayed open.
+  detachGeometry(key);
+
   let t: ReturnType<typeof setTimeout> | null = null;
   const persist = () => void persistGeomNow(win, key);
   const debounced = () => {
@@ -165,10 +181,28 @@ async function trackGeometry(win: TWebviewWindow, key: string): Promise<void> {
     t = setTimeout(persist, 400);
   };
   try {
-    await win.onMoved(debounced);
-    await win.onResized(debounced);
+    const unMoved = await win.onMoved(debounced);
+    const unResized = await win.onResized(debounced);
+    geometryUnlisten.set(key, () => {
+      if (t) clearTimeout(t); // don't let a pending persist fire after detach
+      unMoved();
+      unResized();
+    });
   } catch {
-    /* listeners are best-effort */
+    /* listeners are best-effort — a window without them still works */
+  }
+}
+
+/** Remove geometry listeners for a surface (window closed, or re-attaching). */
+function detachGeometry(key: string): void {
+  const un = geometryUnlisten.get(key);
+  if (un) {
+    try {
+      un();
+    } catch {
+      /* ignore */
+    }
+    geometryUnlisten.delete(key);
   }
 }
 
@@ -296,8 +330,14 @@ async function closeViewerAndWait(mode: ViewerMode, timeoutMs = 3000): Promise<b
   const WebviewWindow = await tauriWebviewWindow();
   try {
     const win = await WebviewWindow.getByLabel(LABELS[mode]);
-    if (!win) return true; // already gone
+    if (!win) {
+      detachGeometry(mode);
+      return true; // already gone
+    }
     await persistGeomNow(win, mode); // preserve position/size before destroying
+    // Drop the listeners before destroying the window: they would otherwise
+    // outlive it, and a reopen must attach fresh ones for the new window.
+    detachGeometry(mode);
     await win.close();
   } catch (err) {
     console.warn(`[windows] close(${LABELS[mode]}) threw:`, err);
