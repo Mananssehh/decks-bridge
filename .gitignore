@@ -39,3 +39,8 @@ release-build.log
 .vscode/
 .idea/
 *.swp
+
+# ── Machine-local tooling config ──────────────────────────────────────────────
+# settings.local.json is per-machine Claude Code state (absolute home paths,
+# local permission grants). It is not project config and should not be shared.
+.claude/settings.local.json
