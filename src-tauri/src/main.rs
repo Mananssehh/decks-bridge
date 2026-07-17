@@ -24,6 +24,27 @@ use tauri::{
 
 struct PendingUpdate(Mutex<Option<Update>>);
 
+/// Store the pending update, recovering the guard if the mutex was poisoned.
+///
+/// A poisoned lock only means some other thread panicked while holding it; the
+/// Option<Update> inside carries no invariant that a panic could have corrupted.
+/// Unwrapping would turn an unrelated panic into a hard crash of the whole app
+/// mid-set, so we take the value and carry on.
+fn set_pending(pending: &tauri::State<'_, PendingUpdate>, value: Option<Update>) {
+    match pending.0.lock() {
+        Ok(mut guard) => *guard = value,
+        Err(poisoned) => *poisoned.into_inner() = value,
+    }
+}
+
+/// Take the cached update out, recovering from poisoning for the same reason.
+fn take_pending(pending: &tauri::State<'_, PendingUpdate>) -> Option<Update> {
+    match pending.0.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
 // ── Return type ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -2612,37 +2633,37 @@ async fn check_for_update(
                 info.current_version, info.version, info.body
             );
             // Cache the update so install_update doesn't need to re-check.
-            *pending.0.lock().unwrap() = Some(update);
+            set_pending(&pending, Some(update));
             Ok(Some(info))
         }
         Ok(None) => {
             eprintln!("[update] already up-to-date");
-            *pending.0.lock().unwrap() = None;
+            set_pending(&pending, None);
             Ok(None)
         }
         Err(e) => {
             let msg = format!("{e}");
             eprintln!("[update] check failed: {msg}");
+            logging::write_line("update", &format!("check failed: {msg}"));
 
-            // If the manifest endpoint doesn't exist yet (placeholder URL,
-            // private repo 404, GitHub raw returning HTML, JSON parse failure)
-            // treat it as "up-to-date" — no update banner, no error shown.
-            // Only surface a real Err for genuine network unreachability so
-            // DJs aren't confused before the release pipeline is wired up.
-            let is_manifest_missing =
-                msg.contains("404")
-                || msg.contains("Not Found")
-                || msg.contains("deserializ")
-                || msg.contains("status code")
-                || msg.to_lowercase().contains("json")
-                || msg.to_lowercase().contains("parse");
+            // ONLY a genuine 404 means "no manifest published for this channel
+            // yet" — that is legitimately 'no update available', not an error.
+            //
+            // Everything else (HTTP 5xx, malformed manifest, signature
+            // verification failure, TLS error) is REAL breakage and must reach
+            // the DJ. Reporting those as "up-to-date" would make a completely
+            // broken update system indistinguishable from a healthy one — and
+            // the updater is the only channel we have to ship a fix, so a silent
+            // failure here is the one failure we can never afford.
+            let manifest_absent = msg.contains("404") || msg.contains("Not Found");
 
-            if is_manifest_missing {
-                eprintln!("[update] treating as up-to-date (manifest not available yet)");
-                *pending.0.lock().unwrap() = None;
+            if manifest_absent {
+                eprintln!("[update] no manifest published — treating as up-to-date");
+                set_pending(&pending, None);
                 return Ok(None);
             }
 
+            set_pending(&pending, None);
             Err(msg)
         }
     }
@@ -2660,10 +2681,7 @@ async fn install_update(
     eprintln!("[update] starting download + install…");
 
     // Use cached update. If not present, do a fresh check as fallback.
-    let update = {
-        let mut guard = pending.0.lock().unwrap();
-        guard.take()
-    };
+    let update = take_pending(&pending);
 
     let update = match update {
         Some(u) => {
