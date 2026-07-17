@@ -112,7 +112,7 @@ export class SyncEngine {
       log:
         deps?.log ??
         ((line) => {
-          // eslint-disable-next-line no-console
+           
           console.log(`[sync] ${line}`);
           void import("./log")
             .then((m) => m.logDiagnostic("sync", line))

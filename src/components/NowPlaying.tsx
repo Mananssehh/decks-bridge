@@ -147,7 +147,11 @@ export default function NowPlaying({ config, onReset, safeMode = false }: Props)
       };
     }
     return cloudSnapshot;
-  }, [cloudSnapshot, detected?.title, detected?.artist]);
+    // album and playbackApp are read above and must be dependencies: without
+    // them a track whose artwork or source app changed while title+artist
+    // stayed identical (e.g. the same song picked up from a different deck)
+    // kept rendering the previous values.
+  }, [cloudSnapshot, detected?.title, detected?.artist, detected?.album, detected?.playbackApp]);
 
   const handleConsoleSwitch = useCallback((to: "expanded" | "mini" | "pill") => {
     openViewer(to).catch((e) => console.error("[console] switch failed:", e));
