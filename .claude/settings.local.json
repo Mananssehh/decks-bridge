@@ -81,7 +81,13 @@
       "Bash(echo \"exit=$?\")",
       "Bash(grep -rniE 'PRIVATE KEY|BEGIN RSA|BEGIN OPENSSH|password.*=.*['\\\\''\"][^'\\\\''\"]{8,}|secret.*=.*['\\\\''\"][^'\\\\''\"]{8,}' src scripts src-tauri/src *.json *.md)",
       "Bash(echo \"exit=$? \\(0/empty = PASS ✓\\)\")",
-      "Bash(grep -A1 '^name = \"tauri\"$' Cargo.lock)"
+      "Bash(grep -A1 '^name = \"tauri\"$' Cargo.lock)",
+      "Bash(node -p \"require\\('./package.json'\\).devDependencies.vitest\")",
+      "Bash(npx vitest *)",
+      "Bash(cp src/lib/offlineQueue.ts /tmp/oq-fixed.bak)",
+      "Bash(python3 -)",
+      "Bash(echo \"typecheck=$?\")",
+      "Bash(npm test *)"
     ]
   }
 }

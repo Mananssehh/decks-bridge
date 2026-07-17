@@ -211,15 +211,41 @@ async function ensureWindow(mode: ViewerMode): Promise<TWebviewWindow | null> {
       visible: true,
     });
 
-    win.once("tauri://error", (e) => {
+    void win.once("tauri://error", (e) => {
       console.error(`[windows] failed to create ${spec.label}:`, e.payload);
     });
+
+    // Window creation is ASYNCHRONOUS: the constructor returns a handle
+    // immediately and the runtime only later decides whether the window really
+    // came up. A non-null handle is therefore not proof of success, so confirm
+    // the window actually exists before telling the caller it does — the same
+    // "confirm, don't assume" rule closeViewerAndWait applies in reverse.
+    if (!(await waitForWindow(spec.label))) {
+      console.error(`[windows] ${spec.label} was created but never appeared`);
+      return null;
+    }
+
     void trackGeometry(win, mode);
     return win;
   } catch (err) {
     console.error(`[windows] create threw for ${spec.label}:`, err);
     return null;
   }
+}
+
+/** Wait until a window with `label` really exists. Returns false on timeout. */
+async function waitForWindow(label: string, timeoutMs = 5000): Promise<boolean> {
+  const WebviewWindow = await tauriWebviewWindow();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await WebviewWindow.getByLabel(label)) return true;
+    } catch {
+      /* lookup can reject mid-creation; keep polling until the deadline */
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
 }
 
 // ── Single-viewer invariant ──────────────────────────────────────────────────
@@ -349,7 +375,19 @@ export async function performSwitch(to: ViewerMode): Promise<void> {
     console.error(`[windows] aborting switch — viewers still alive: ${remaining.join(", ")}`);
     return;
   }
-  await ensureWindow(to);
+
+  // Create the replacement BEFORE hiding main, and only hide main once we know
+  // the new surface actually exists. ensureWindow swallows its own errors and
+  // returns null; hiding main on that path would leave the DJ with a running
+  // app, no viewer, and — on macOS — no tray to recover from, i.e. force-quit.
+  // Main stays visible on failure so there is always a way back.
+  const win = await ensureWindow(to);
+  if (!win) {
+    console.error(`[windows] aborting switch — ${to} viewer could not be created; keeping console visible`);
+    await setMainVisible(true);
+    return;
+  }
+
   persistViewerMode(to);
   await assertSingleViewerWindow(`after switch → ${to}`);
   await setMainVisible(false); // one surface at a time: tuck the main console away
