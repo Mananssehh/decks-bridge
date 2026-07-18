@@ -97,9 +97,26 @@ sign_updater_tarball() {
 if [[ "$(uname -s)" == "Darwin" && -d "$APP_PATH" ]]; then
   verify_app_bundle "$APP_PATH"
 
-  echo "==> Confirming app is signed + notarized before packaging"
+  echo "==> Confirming app is Developer ID signed + notarized + stapled before packaging"
+  # These are PUBLIC-distribution artifacts. If any of the three checks below
+  # fail, the app would land on users' machines as "damaged" — so abort rather
+  # than package it. This is the last gate before an artifact becomes a download.
   codesign --verify --deep --strict --verbose=4 "$APP_PATH"
-  spctl -a -vvv "$APP_PATH"
+
+  if ! codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -q "Developer ID Application"; then
+    echo "ERROR: $APP_PATH is not Developer ID signed — refusing to package for public distribution." >&2
+    echo "       (Ad-hoc / self-signed builds are rejected by Gatekeeper as \"damaged\".)" >&2
+    exit 1
+  fi
+
+  if ! xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
+    echo "ERROR: $APP_PATH has no stapled notarization ticket — refusing to package." >&2
+    echo "       Run scripts/notarize-macos-app.sh first (Apple notarization + staple)." >&2
+    exit 1
+  fi
+
+  # spctl is Gatekeeper itself: this must say "accepted ... source=Notarized Developer ID".
+  spctl -a -vvv -t exec "$APP_PATH"
 
   # Architecture MUST come from the requested $TARGET, not from `uname -m`.
   #

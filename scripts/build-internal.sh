@@ -7,8 +7,13 @@ cd "$ROOT"
 
 TARGET="${1:-}"
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-OUT="$ROOT/release/v${VERSION}-internal/mac"
-MAC="$ROOT/release/mac"
+# Internal outputs live UNDER release/internal/ ONLY. They must never share a
+# path with public release artifacts (release/mac, release/v<ver>/mac): the CI
+# publish step globs those, so an internal ad-hoc build written there would be
+# uploaded to a GitHub Release and reach users as a "damaged" download. Keeping
+# internal artifacts in their own tree makes that collision impossible.
+OUT="$ROOT/release/internal/v${VERSION}/mac"
+MAC="$ROOT/release/internal/mac"
 DIST="$ROOT/decks bridge Mac"
 
 # Build to a LOCAL (non-iCloud) target dir by default. The in-project
