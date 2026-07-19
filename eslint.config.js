@@ -6,7 +6,23 @@ import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**", "src-tauri/**", "scripts/**", "*.config.*"] },
+  {
+    // Only src/ holds lintable app code. Everything else is build output,
+    // vendored deps, or non-TS tooling. `release/**` and the tester folders
+    // matter especially: they contain packaged .app bundles, and letting
+    // ESLint walk those binaries makes `npm run lint` hang for minutes.
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "src-tauri/**",
+      "scripts/**",
+      "release/**",
+      "decks bridge*/**",
+      "windows/**",
+      "**/*.app/**",
+      "*.config.*",
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
