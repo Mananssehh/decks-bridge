@@ -14,7 +14,11 @@ VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 # internal artifacts in their own tree makes that collision impossible.
 OUT="$ROOT/release/internal/v${VERSION}/mac"
 MAC="$ROOT/release/internal/mac"
-DIST="$ROOT/decks bridge Mac"
+# Internal builds stay ENTIRELY under release/internal/. They must never land in
+# "decks bridge Mac" or any other shareable folder: those look distributable, and
+# an internal build is ad-hoc/self-signed and Gatekeeper-rejected. Testers of an
+# internal build take it from release/internal/ knowingly.
+DIST="$ROOT/release/internal/testers-mac"
 
 # Build to a LOCAL (non-iCloud) target dir by default. The in-project
 # src-tauri/target lives under the iCloud-synced Desktop, where cargo's
@@ -106,7 +110,9 @@ cp "$ZIP" "$OUT/Decks.Bridge_${VERSION}_${ARCH_TAG}.app.zip"
 cp "$DMG" "$DIST/Decks Bridge.dmg"
 cp "$ZIP" "$DIST/Decks Bridge.zip"
 cp TEST_INSTALL.md "$DIST/"
-bash "$ROOT/scripts/sync-tester-folders.sh"
+# Deliberately NOT calling sync-tester-folders.sh here: that populates the
+# shareable "decks bridge Mac" folder, and this is an unsigned internal build.
+# sync-tester-folders.sh now refuses non-notarized builds anyway.
 
 echo "==> [6/6] Verify packaged artifacts"
 TMP="$(mktemp -d)"
