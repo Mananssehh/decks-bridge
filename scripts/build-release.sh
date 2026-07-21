@@ -26,6 +26,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+# [0/7] Fail-closed preflight. A release that cannot be signed + notarized must
+# abort HERE, before we build — not silently produce an ad-hoc bundle that
+# Gatekeeper reports as "damaged" on every user's Mac. This is the guardrail
+# that the previous pipeline was missing.
+echo "==> [0/7] Signing preflight"
+bash "$ROOT/scripts/preflight-signing.sh"
+
 BUILD_ARGS=()
 if [[ -n "$TARGET" ]]; then
   BUILD_ARGS+=(--target "$TARGET")

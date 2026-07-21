@@ -8,14 +8,35 @@ MAC_DST="$ROOT/decks bridge Mac"
 WIN_SRC="$ROOT/release/windows"
 WIN_DST="$ROOT/windows"
 
+# Refuse to publish an artifact whose app is not notarized (Gatekeeper-accepted).
+# "decks bridge Mac" is a shareable folder; an ad-hoc/self-signed build copied
+# there reaches a tester's Mac as "damaged". The only way in is a notarized build.
+assert_notarized_dmg() {
+  local dmg="$1"
+  local mount out rc=0
+  mount="$(hdiutil attach "$dmg" -nobrowse -readonly 2>/dev/null | grep -o '/Volumes/.*' | head -1)"
+  [[ -n "$mount" ]] || { echo "  ✗ refuse: cannot mount $dmg"; return 1; }
+  out="$(spctl -a -t exec -vv "$mount/Decks Bridge.app" 2>&1)"
+  echo "$out" | grep -qi 'accepted' && echo "$out" | grep -qi 'notarized' || rc=1
+  hdiutil detach "$mount" -quiet 2>/dev/null || true
+  return $rc
+}
+
 sync_mac() {
   mkdir -p "$MAC_DST"
-  rm -rf "$MAC_DST/Decks Bridge.app"
   if [[ ! -d "$MAC_SRC" ]]; then
-    echo "Skip Mac: no $MAC_SRC (run npm run build:internal first)"
+    echo "Skip Mac: no $MAC_SRC (run the signed release build first)"
     return 0
   fi
 
+  # GATE: only a notarized build may reach the shareable tester folder.
+  if [[ -f "$MAC_SRC/Decks Bridge.dmg" ]] && ! assert_notarized_dmg "$MAC_SRC/Decks Bridge.dmg"; then
+    echo "  ✗ REFUSING to sync: $MAC_SRC/Decks Bridge.dmg is not notarized (Gatekeeper would reject it)."
+    echo "    Tester folders receive PUBLIC, notarized builds only. Internal builds live in release/internal/."
+    return 1
+  fi
+
+  rm -rf "$MAC_DST/Decks Bridge.app"
   for f in "Decks Bridge.dmg" "Decks Bridge.zip"; do
     [[ -f "$MAC_SRC/$f" ]] && cp -f "$MAC_SRC/$f" "$MAC_DST/"
   done

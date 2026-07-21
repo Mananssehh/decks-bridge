@@ -21,6 +21,8 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
   const [digits, setDigits] = useState<string[]>(Array(6).fill(""));
   const [status, setStatus] = useState<PairStatus>({ kind: "idle" });
   const [showAdvanced, setShowAdvanced] = useState(false);
+  /** The code was prefilled by a decksbridge:// link rather than typed. */
+  const [fromDeepLink, setFromDeepLink] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>(Array(6).fill(null));
 
   const code = digits.join("");
@@ -31,36 +33,58 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
     inputRefs.current[Math.max(0, Math.min(5, i))]?.focus();
   }, []);
 
-  // ── Deep-link listener (silent — no UI) ──────────────────────────────────
+  // ── Deep-link listener ────────────────────────────────────────────────────
+  //
+  // A decksbridge://pair?code=NNNNNN URL PREFILLS the code — it never connects
+  // on its own. Any web page can fire this scheme at the app, and auto-pairing
+  // meant a DJ who clicked a crafted link was silently re-paired to someone
+  // else's event: their Now Playing data flows to the attacker and their real
+  // event goes dark, with no visible signal. Pairing is a credential exchange,
+  // so it takes a deliberate click. Prefilling keeps the convenience (no
+  // typing) without letting an untrusted URL act on the DJ's behalf.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
 
     onOpenUrl((urls) => {
       for (const url of urls) {
         const match = url.match(/^decksbridge:\/\/pair\?code=(\d{6})$/i);
         if (match) {
-          const incoming = match[1];
-          setDigits(incoming.split(""));
-          triggerConnect(incoming);
+          setDigits(match[1].split(""));
+          setFromDeepLink(true);
+          setStatus({ kind: "idle" });
           break;
         }
       }
     })
-      .then((fn) => { unlisten = fn; })
+      .then((fn) => {
+        // If we unmounted while onOpenUrl was still resolving, the cleanup ran
+        // with unlisten still null and the listener was never removed — it
+        // leaked and then fired setState on an unmounted component.
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
       .catch(() => {});
 
-    return () => { unlisten?.(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   // ── Connect ───────────────────────────────────────────────────────────────
   async function triggerConnect(c: string) {
     if (c.length !== 6 || busy) return;
-    console.log("[pair] → connecting with code", c);
+    console.log("[pair] → connecting");
     setStatus({ kind: "connecting" });
 
     const result = await pairWithCode(c);
-    console.log("[pair] ← result", result);
+    // Never log the whole result: result.config.token is the DJ's credential
+    // and result.debug.body used to carry it too, so this logged it twice.
+    console.log("[pair] ← ok:", result.ok, "status:", result.debug?.status);
 
     if (!result.ok || !result.config) {
       const msg = friendlyPairError(result.error ?? "Something went wrong.");
@@ -95,6 +119,7 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
     const next = [...digits];
     next[index] = digit;
     setDigits(next);
+    setFromDeepLink(false); // hand-edited — the link notice no longer applies
     if (status.kind === "error") setStatus({ kind: "idle" });
     if (digit && index < 5) focusIndex(index + 1);
   }
@@ -126,6 +151,7 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
     const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
     const next = Array(6).fill("").map((_, i) => pasted[i] ?? "");
     setDigits(next);
+    setFromDeepLink(false); // pasted by the DJ, not injected by a link
     if (status.kind === "error") setStatus({ kind: "idle" });
     focusIndex(Math.min(pasted.length, 5));
   }
@@ -208,6 +234,23 @@ export default function PairingScreen({ onPaired, onManualSetup }: Props) {
 
       {/* Status messages */}
       <div style={{ width: "100%", marginTop: 16, minHeight: 44 }}>
+        {fromDeepLink && status.kind === "idle" && (
+          <div
+            className="status-msg"
+            style={{
+              textAlign: "center",
+              fontSize: 12,
+              color: "var(--text-muted)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "8px 10px",
+            }}
+          >
+            This code came from a link. Check it matches your event dashboard,
+            then press Connect.
+          </div>
+        )}
+
         {isConnecting && (
           <p style={{ textAlign: "center", fontSize: 13, color: "var(--text-muted)" }}>
             Connecting…

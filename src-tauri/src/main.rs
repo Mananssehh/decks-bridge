@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use tauri::Emitter;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Manager;
 #[cfg(target_os = "windows")]
 use tauri::{
@@ -23,6 +23,27 @@ use tauri::{
 // use it directly without a second manifest fetch.
 
 struct PendingUpdate(Mutex<Option<Update>>);
+
+/// Store the pending update, recovering the guard if the mutex was poisoned.
+///
+/// A poisoned lock only means some other thread panicked while holding it; the
+/// Option<Update> inside carries no invariant that a panic could have corrupted.
+/// Unwrapping would turn an unrelated panic into a hard crash of the whole app
+/// mid-set, so we take the value and carry on.
+fn set_pending(pending: &tauri::State<'_, PendingUpdate>, value: Option<Update>) {
+    match pending.0.lock() {
+        Ok(mut guard) => *guard = value,
+        Err(poisoned) => *poisoned.into_inner() = value,
+    }
+}
+
+/// Take the cached update out, recovering from poisoning for the same reason.
+fn take_pending(pending: &tauri::State<'_, PendingUpdate>) -> Option<Update> {
+    match pending.0.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
 
 // ── Return type ───────────────────────────────────────────────────────────────
 
@@ -57,19 +78,27 @@ pub struct NowPlayingTrack {
 // ── macOS version + Automation-permission helpers ─────────────────────────────
 
 /// Returns the macOS product version as (major, minor), e.g. (15, 6).
+///
+/// Cached for the process lifetime: the OS version cannot change while we are
+/// running, but this used to fork `sw_vers` on every call — and read_media_remote
+/// calls it twice per detect, i.e. every 3 seconds for the whole set.
 #[cfg(target_os = "macos")]
 fn macos_version() -> (u32, u32) {
-    let out = std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output();
-    if let Ok(o) = out {
-        let s = String::from_utf8_lossy(&o.stdout);
-        let mut parts = s.trim().split('.');
-        let major = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-        return (major, minor);
-    }
-    (0, 0)
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<(u32, u32)> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let out = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let mut parts = s.trim().split('.');
+            let major = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let minor = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            return (major, minor);
+        }
+        (0, 0)
+    })
 }
 
 /// True on macOS 15.4+ where Apple restricts the private MediaRemote framework's
@@ -591,14 +620,72 @@ pub fn detect() -> NowPlayingTrack {
 
 // ── Process helpers ───────────────────────────────────────────────────────────
 
+/// Snapshot of running process names, cached briefly.
+///
+/// detect() asks about six or more apps per poll, and each question used to
+/// fork+exec its own `pgrep`. At a 3s poll for a four-hour set that is tens of
+/// thousands of process spawns on a machine that is also running a DJ rig. One
+/// `ps` answers every question instead.
+///
+/// The TTL is well under the poll interval, so each detect still sees a fresh
+/// process list — it only collapses the burst of lookups *within* a single
+/// detect into one spawn. Process state cannot meaningfully change inside that
+/// window given detection is already sampled every 3s.
+/// Run `f` against the cached process-name list, refreshing it if stale.
+///
+/// Takes a closure rather than returning the Vec so callers borrow the cached
+/// list instead of cloning it: detect() asks about ~10 apps per poll, and
+/// cloning a ~500-entry Vec<String> each time would trade the fork/exec we just
+/// removed for thousands of allocations per poll.
+#[cfg(target_os = "macos")]
+fn with_process_names<R>(f: impl FnOnce(&[String]) -> R) -> R {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_millis(1_000);
+
+    // Poisoning is recovered rather than unwrapped: a stale process list is
+    // never a reason to crash the app mid-set.
+    let mut guard = match CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let fresh = guard
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < TTL);
+
+    if !fresh {
+        // -A all processes, -c the executable name only (no args, no path),
+        // -o comm= suppresses the header. Verified against `pgrep -xi` on the
+        // live process table: preserves names containing spaces ("Serato DJ
+        // Pro") and does not truncate.
+        let names: Vec<String> = std::process::Command::new("ps")
+            .args(["-Ac", "-o", "comm="])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        *guard = Some((Instant::now(), names));
+    }
+
+    match guard.as_ref() {
+        Some((_, names)) => f(names),
+        None => f(&[]),
+    }
+}
+
 /// Returns true if `process_name` is currently in the macOS process list.
+/// Matches the previous `pgrep -xi` semantics: exact name, case-insensitive.
 #[cfg(target_os = "macos")]
 fn is_process_running(process_name: &str) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-xi", process_name]) // -x = exact match, -i = case-insensitive
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    with_process_names(|names| names.iter().any(|n| n.eq_ignore_ascii_case(process_name)))
 }
 
 /// Returns the running djay process name, or None if djay is not open.
@@ -2612,37 +2699,37 @@ async fn check_for_update(
                 info.current_version, info.version, info.body
             );
             // Cache the update so install_update doesn't need to re-check.
-            *pending.0.lock().unwrap() = Some(update);
+            set_pending(&pending, Some(update));
             Ok(Some(info))
         }
         Ok(None) => {
             eprintln!("[update] already up-to-date");
-            *pending.0.lock().unwrap() = None;
+            set_pending(&pending, None);
             Ok(None)
         }
         Err(e) => {
             let msg = format!("{e}");
             eprintln!("[update] check failed: {msg}");
+            logging::write_line("update", &format!("check failed: {msg}"));
 
-            // If the manifest endpoint doesn't exist yet (placeholder URL,
-            // private repo 404, GitHub raw returning HTML, JSON parse failure)
-            // treat it as "up-to-date" — no update banner, no error shown.
-            // Only surface a real Err for genuine network unreachability so
-            // DJs aren't confused before the release pipeline is wired up.
-            let is_manifest_missing =
-                msg.contains("404")
-                || msg.contains("Not Found")
-                || msg.contains("deserializ")
-                || msg.contains("status code")
-                || msg.to_lowercase().contains("json")
-                || msg.to_lowercase().contains("parse");
+            // ONLY a genuine 404 means "no manifest published for this channel
+            // yet" — that is legitimately 'no update available', not an error.
+            //
+            // Everything else (HTTP 5xx, malformed manifest, signature
+            // verification failure, TLS error) is REAL breakage and must reach
+            // the DJ. Reporting those as "up-to-date" would make a completely
+            // broken update system indistinguishable from a healthy one — and
+            // the updater is the only channel we have to ship a fix, so a silent
+            // failure here is the one failure we can never afford.
+            let manifest_absent = msg.contains("404") || msg.contains("Not Found");
 
-            if is_manifest_missing {
-                eprintln!("[update] treating as up-to-date (manifest not available yet)");
-                *pending.0.lock().unwrap() = None;
+            if manifest_absent {
+                eprintln!("[update] no manifest published — treating as up-to-date");
+                set_pending(&pending, None);
                 return Ok(None);
             }
 
+            set_pending(&pending, None);
             Err(msg)
         }
     }
@@ -2660,10 +2747,7 @@ async fn install_update(
     eprintln!("[update] starting download + install…");
 
     // Use cached update. If not present, do a fresh check as fallback.
-    let update = {
-        let mut guard = pending.0.lock().unwrap();
-        guard.take()
-    };
+    let update = take_pending(&pending);
 
     let update = match update {
         Some(u) => {
@@ -2753,7 +2837,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+/// Bring the main window back: Windows tray "Show"/left-click, macOS Dock click.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -2870,11 +2955,26 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            #[cfg(target_os = "windows")]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // ONLY the main window is hidden instead of destroyed.
+                //
+                // Viewer windows must really close: windows.rs/windows.ts closes
+                // one and waits for it to disappear before creating its
+                // replacement, so intercepting their close would leave the
+                // window alive-but-hidden, hang that wait for its full timeout,
+                // and abort the switch. Scoping to "main" keeps the viewer
+                // lifecycle intact on every platform.
+                if window.label() != "main" {
+                    return;
+                }
+
+                // Closing the main window must never kill the DJ's set. Bridge
+                // is a background sync tool: hide the window and keep detecting.
+                // Windows users get it back from the tray; macOS users from the
+                // Dock icon (RunEvent::Reopen below). Cmd+Q / Quit still exits.
                 let _ = window.hide();
                 api.prevent_close();
-                logging::write_line("tray", "window hidden to system tray");
+                logging::write_line("window", "main window hidden — sync continues");
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2889,6 +2989,21 @@ fn main() {
             log_diagnostic,
             get_log_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Decks Bridge");
+        .build(tauri::generate_context!())
+        .expect("error while building Decks Bridge")
+        .run(|_app, _event| {
+            // macOS: the window is hidden rather than destroyed on close (see
+            // on_window_event), so clicking the Dock icon must bring it back —
+            // otherwise a DJ who closed the window has a running, unreachable
+            // app and no tray to recover from.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {
+                // Only restore main when nothing is on screen. If a mini/pill
+                // viewer is up, that IS the DJ's chosen surface and main is
+                // hidden deliberately — don't fight their layout.
+                if !has_visible_windows {
+                    show_main_window(_app);
+                }
+            }
+        });
 }
