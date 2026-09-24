@@ -1,12 +1,9 @@
-import { getCurrentVersion } from "./updater";
+import { getCurrentVersion, UPDATE_MANIFEST_URL } from "./updater";
 import { getLogDir } from "./log";
 import { configDebug, type Config } from "./store";
 import { getQueueLength } from "./offlineQueue";
 import { isMacOs, isWindows } from "./platform";
 import type { ConnectionStatus } from "./connection";
-
-const UPDATE_CHANNEL =
-  "https://raw.githubusercontent.com/Mananssehh/decks-bridge-releases/main/update-manifest.json";
 
 export interface DiagnosticsSnapshot {
   version: string;
@@ -55,7 +52,7 @@ export async function gatherDiagnostics(opts: {
     supabaseLatencyMs: opts.supabaseLatencyMs,
     lastIngestAt: opts.lastIngestAt,
     tokenStatus: dbg.hasToken ? "present" : "missing",
-    updateChannel: UPDATE_CHANNEL,
+    updateChannel: UPDATE_MANIFEST_URL,
     logsFolder,
     offlineQueue: getQueueLength(),
     pollIntervalMs: opts.pollIntervalMs,

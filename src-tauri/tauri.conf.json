@@ -31,9 +31,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFOTRDMDFGQUUxRjQ2NUQKUldSZFJoK3VIOENVN3JoU3grWlA5aEN4NFAvR2RPOEZmUjZRM0djS01HSHM4SW1mTWNkaHdUVDQK",
       "endpoints": [
-        "https://raw.githubusercontent.com/Mananssehh/decks-bridge-releases/main/update-manifest.json"
-      ],
-      "dialog": false
+        "https://github.com/Mananssehh/decks-bridge/releases/latest/download/latest.json"
+      ]
     }
   },
   "bundle": {

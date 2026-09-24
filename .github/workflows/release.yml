@@ -1,28 +1,147 @@
 name: Release
 
+# Publishes a Decks Bridge release — and with it the in-app update — ONLY when a
+# version tag is pushed. Pushes and merges to main never publish anything:
+# installed apps read latest.json from the newest *published, non-pre-release*
+# GitHub Release, and only the `publish` job below creates releases.
+#
+#   1. npm run release:version -- 1.2.3        (sets every version file)
+#   2. Add "## [1.2.3] - YYYY-MM-DD" to CHANGELOG.md (DJs see this text)
+#   3. Merge to main, then: git tag v1.2.3 && git push origin v1.2.3
+#
+# Tags like v1.2.3-rc.1 publish a GitHub *pre-release*, which installed apps
+# ignore — use them to test the pipeline. "Run workflow" (workflow_dispatch)
+# builds and verifies everything but never publishes.
+# One-time setup, secrets and limitations: RELEASE.md.
+
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Version, notes and secrets
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The tag must name the version the app reports at runtime, or installed
+      # apps would be offered the same "update" again after installing it.
+      - name: Tag matches the app version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            node scripts/release-tools.mjs check-version --tag "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release-tools.mjs check-version >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stable releases come from main
+        if: github.ref_type == 'tag' && steps.version.outputs.prerelease == 'false'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main. Merge the release to main first, then tag that commit."
+            exit 1
+          fi
+
+      - name: Release notes exist in CHANGELOG.md
+        run: node scripts/release-tools.mjs release-notes "${{ steps.version.outputs.version }}" --out release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+      - name: Signing secrets are configured
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MACOS_BETA_SIGNING_P12_BASE64: ${{ secrets.MACOS_BETA_SIGNING_P12_BASE64 }}
+          MACOS_BETA_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_BETA_SIGNING_P12_PASSWORD }}
+        run: |
+          missing=()
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+                      MACOS_BETA_SIGNING_P12_BASE64 MACOS_BETA_SIGNING_P12_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing Actions secrets: ${missing[*]}. See RELEASE.md → One-time setup."
+            exit 1
+          fi
+          echo "All signing secrets are present."
+
+  verify:
+    name: Tests and build checks
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Linux libraries for the Rust tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --bin decks-bridge
+
   build-macos:
+    name: macOS (${{ matrix.arch }})
+    needs: prepare
     strategy:
+      fail-fast: true
       matrix:
         include:
           - target: aarch64-apple-darwin
-            arch_tag: aarch64
+            arch: aarch64
           - target: x86_64-apple-darwin
-            arch_tag: x64
+            arch: x64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -33,66 +152,48 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
 
-      - name: Import Apple Developer ID certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
-            echo "No APPLE_CERTIFICATE — running internal ad-hoc build instead"
-            npm run build:internal -- ${{ matrix.target }}
-            bash scripts/hash-release.sh
-            exit 0
-          fi
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p actions build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p actions build.keychain
-          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain \
-            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
-          security find-identity -v -p codesigning build.keychain
+      # Each secret is only visible to the one step that needs it; the build
+      # itself (which runs npm scripts) never sees a signing secret.
+      - name: Build app
+        run: bash scripts/release-macos.sh build ${{ matrix.target }}
 
-      - name: Write App Store Connect API key
-        if: ${{ secrets.APPLE_API_KEY != '' }}
+      - name: Import the stable beta signing identity
         env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        run: |
-          mkdir -p ~/.appstoreconnect/private_keys
-          echo "$APPLE_API_KEY" > ~/.appstoreconnect/private_keys/AuthKey.p8
+          MACOS_BETA_SIGNING_P12_BASE64: ${{ secrets.MACOS_BETA_SIGNING_P12_BASE64 }}
+          MACOS_BETA_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_BETA_SIGNING_P12_PASSWORD }}
+        run: bash scripts/import-beta-identity.sh
 
-      - name: Production macOS build (sign + notarize + package)
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      - name: Sign and package (self-signed, not notarized)
+        run: bash scripts/release-macos.sh package ${{ matrix.target }}
+
+      - name: Sign the updater archive
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_PATH: ~/.appstoreconnect/private_keys/AuthKey.p8
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: bash scripts/build-release.sh ${{ matrix.target }}
+        run: bash scripts/release-macos.sh sign-updater ${{ matrix.target }}
 
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$HOME/Library/Keychains/decks-bridge-beta.keychain-db" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch_tag }}
-          path: |
-            release/mac/**/*
-            release/v*/mac/**/*
-            release/SHA256SUMS.txt
-          if-no-files-found: warn
+          name: macos-${{ matrix.arch }}
+          path: release/upload/
+          if-no-files-found: error
 
   build-windows:
+    name: Windows (x64)
+    needs: prepare
     runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -101,55 +202,116 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
 
-      - name: Build Windows release
+      # Authenticode is optional, exactly as before: without WINDOWS_SIGNING_CERT
+      # the installer is unsigned and SmartScreen warns on first install.
+      - name: Build installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_SIGNING_CERT) {
+            $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT))
+            $env:WINDOWS_SIGNING_CERT = $certPath
+          } else {
+            Write-Host "No WINDOWS_SIGNING_CERT: the installer is not Authenticode-signed."
+          }
+          npm run build:release:windows
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $src = "release/v$env:VERSION/windows"
+          $out = "release/upload"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "$src/Decks Bridge_$($env:VERSION)_x64-setup.exe" "$out/Decks.Bridge_$($env:VERSION)_x64-setup.exe"
+          Copy-Item "$src/Decks Bridge_$($env:VERSION)_x64-setup.nsis.zip" "$out/Decks.Bridge_$($env:VERSION)_x64-setup.nsis.zip"
+          Copy-Item "$src/Decks.Bridge_$($env:VERSION)_x64.zip" "$out/Decks.Bridge_$($env:VERSION)_x64-portable.zip"
+          Get-ChildItem $out
+
+      - name: Sign the updater archive
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
-          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
-        shell: pwsh
         run: |
-          if ($env:WINDOWS_SIGNING_CERT) {
-            $certPath = "$env:RUNNER_TEMP\codesign.pfx"
-            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT))
-            $env:WINDOWS_SIGNING_CERT = $certPath
-            npm run build:release:windows
-          } else {
-            Write-Host "No WINDOWS_SIGNING_CERT — internal unsigned build"
-            npm run build:internal:windows
-          }
+          $zip = "release/upload/Decks.Bridge_$($env:VERSION)_x64-setup.nsis.zip"
+          npx tauri signer sign $zip | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/release-tools.mjs verify-signature $zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: |
-            release/windows/**/*
-            release/v*/windows/**/*
+          path: release/upload/
           if-no-files-found: error
 
   publish:
-    needs: [build-macos, build-windows]
+    name: Publish GitHub Release
+    needs: [prepare, verify, build-macos, build-windows]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Flatten release assets
+      # latest.json lists every platform, and every signature is verified
+      # against the public key the installed apps trust before anything is
+      # uploaded.
+      - name: Assemble release files and latest.json
         run: |
+          set -euo pipefail
           mkdir -p release-upload
-          find artifacts -type f \( \
-            -name '*.dmg' -o -name '*.zip' -o -name '*.tar.gz' -o -name '*.sig' -o -name '*.exe' \
-          \) -exec cp {} release-upload/ \;
-          find artifacts -name 'SHA256SUMS.txt' -exec cp {} release-upload/ \;
-          ls -la release-upload/
+          cp artifacts/macos-aarch64/* artifacts/macos-x64/* artifacts/windows-x64/* release-upload/
+          node scripts/release-tools.mjs latest-json \
+            --version "$VERSION" --repo "$GITHUB_REPOSITORY" --assets-dir release-upload \
+            --notes-file artifacts/release-notes/release-notes.md --out release-upload/latest.json
+          (cd release-upload && sha256sum -- * > SHA256SUMS.txt)
+          ls -la release-upload
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-upload/*
-          generate_release_notes: true
+      # Upload everything to a draft first: installed apps only see a release
+      # once it is published, so they never find a half-uploaded one.
+      - name: Create draft release
+        run: |
+          set -euo pipefail
+          if is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::error::Release $TAG is already published. Published releases are never replaced; tag a new version."
+              exit 1
+            fi
+            echo "Replacing the unpublished draft left by an earlier attempt."
+            gh release delete "$TAG" --yes
+          fi
+          flags=(--draft --verify-tag --title "Decks Bridge $VERSION" --notes-file artifacts/release-notes/release-notes.md)
+          if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" release-upload/*
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
+          echo "Published $TAG."

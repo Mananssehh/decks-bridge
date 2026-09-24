@@ -4,11 +4,9 @@
 mod detect_windows;
 mod logging;
 mod sentry;
+mod updater;
 
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use tauri::Emitter;
-use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(target_os = "windows")]
 use tauri::Manager;
@@ -17,12 +15,6 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-
-// ── Pending update cache ──────────────────────────────────────────────────────
-// Holds the Update object returned by check_for_update so install_update can
-// use it directly without a second manifest fetch.
-
-struct PendingUpdate(Mutex<Option<Update>>);
 
 // ── Return type ───────────────────────────────────────────────────────────────
 
@@ -2571,150 +2563,6 @@ fn get_log_dir() -> String {
     logging::log_dir().display().to_string()
 }
 
-// ── Updater ───────────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateInfo {
-    pub version: String,
-    pub current_version: String,
-    pub body: Option<String>,
-    pub date: Option<String>,
-}
-
-/// Check for an available update.
-/// Returns Some(UpdateInfo) if a newer version is available, None if up-to-date.
-/// Errors (network failure, manifest parse error) are returned as Err(String).
-/// The Update object is cached in PendingUpdate state for install_update to use.
-#[tauri::command]
-async fn check_for_update(
-    app: tauri::AppHandle,
-    pending: tauri::State<'_, PendingUpdate>,
-) -> Result<Option<UpdateInfo>, String> {
-    let current = app.package_info().version.to_string();
-    eprintln!("[update] check — current version: {}", current);
-
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("Failed to build updater: {e}"))?;
-
-    match updater.check().await {
-        Ok(Some(update)) => {
-            let info = UpdateInfo {
-                version: update.version.clone(),
-                current_version: current,
-                body: update.body.clone(),
-                date: update.date.map(|d| d.to_string()),
-            };
-            eprintln!(
-                "[update] update available: {} → {}  notes={:?}",
-                info.current_version, info.version, info.body
-            );
-            // Cache the update so install_update doesn't need to re-check.
-            *pending.0.lock().unwrap() = Some(update);
-            Ok(Some(info))
-        }
-        Ok(None) => {
-            eprintln!("[update] already up-to-date");
-            *pending.0.lock().unwrap() = None;
-            Ok(None)
-        }
-        Err(e) => {
-            let msg = format!("{e}");
-            eprintln!("[update] check failed: {msg}");
-
-            // If the manifest endpoint doesn't exist yet (placeholder URL,
-            // private repo 404, GitHub raw returning HTML, JSON parse failure)
-            // treat it as "up-to-date" — no update banner, no error shown.
-            // Only surface a real Err for genuine network unreachability so
-            // DJs aren't confused before the release pipeline is wired up.
-            let is_manifest_missing =
-                msg.contains("404")
-                || msg.contains("Not Found")
-                || msg.contains("deserializ")
-                || msg.contains("status code")
-                || msg.to_lowercase().contains("json")
-                || msg.to_lowercase().contains("parse");
-
-            if is_manifest_missing {
-                eprintln!("[update] treating as up-to-date (manifest not available yet)");
-                *pending.0.lock().unwrap() = None;
-                return Ok(None);
-            }
-
-            Err(msg)
-        }
-    }
-}
-
-/// Download and install the pending update.
-/// Emits tauri events: "update://progress" with `{ downloaded, total }` bytes.
-/// Call relaunch() from the frontend after this resolves.
-/// Uses the cached update from check_for_update — no second manifest fetch.
-#[tauri::command]
-async fn install_update(
-    app: tauri::AppHandle,
-    pending: tauri::State<'_, PendingUpdate>,
-) -> Result<(), String> {
-    eprintln!("[update] starting download + install…");
-
-    // Use cached update. If not present, do a fresh check as fallback.
-    let update = {
-        let mut guard = pending.0.lock().unwrap();
-        guard.take()
-    };
-
-    let update = match update {
-        Some(u) => {
-            eprintln!("[update] using cached update v{}", u.version);
-            u
-        }
-        None => {
-            eprintln!("[update] no cached update — running fresh check");
-            let updater = app
-                .updater_builder()
-                .build()
-                .map_err(|e| format!("Failed to build updater: {e}"))?;
-            updater
-                .check()
-                .await
-                .map_err(|e| format!("Check failed: {e}"))?
-                .ok_or_else(|| "No update available".to_string())?
-        }
-    };
-
-    eprintln!("[update] downloading v{}…", update.version);
-
-    let app2 = app.clone();
-    update
-        .download_and_install(
-            move |chunk_len, total| {
-                eprintln!(
-                    "[update] progress: {} / {}",
-                    chunk_len,
-                    total.unwrap_or(0)
-                );
-                // Emit progress event to the frontend.
-                let _ = app2.emit(
-                    "update://progress",
-                    serde_json::json!({ "downloaded": chunk_len, "total": total }),
-                );
-            },
-            || {
-                eprintln!("[update] download finished — installing…");
-            },
-        )
-        .await
-        .map_err(|e| {
-            eprintln!("[update] install failed: {e}");
-            format!("{e}")
-        })?;
-
-    eprintln!("[update] install complete — waiting for frontend to relaunch");
-    Ok(())
-}
-
 // ── Windows tray ──────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -2847,7 +2695,7 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .manage(PendingUpdate(Mutex::new(None)))
+        .manage(updater::PendingUpdate::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -2884,8 +2732,8 @@ fn main() {
             check_djay,
             check_serato,
             check_rekordbox,
-            check_for_update,
-            install_update,
+            updater::check_for_update,
+            updater::install_update,
             log_diagnostic,
             get_log_dir,
         ])

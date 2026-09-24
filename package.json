@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "node scripts/check-no-mock.mjs && tsc && vite build",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build": "tauri build && bash scripts/fix-macos-plist.sh",
@@ -16,7 +18,8 @@
     "build:internal:aarch64": "bash scripts/build-internal.sh aarch64-apple-darwin",
     "build:internal:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-internal-windows.ps1",
     "sync:testers": "bash scripts/sync-tester-folders.sh",
-    "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1"
+    "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1",
+    "release:version": "node scripts/release-tools.mjs bump-version"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -33,6 +36,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.3",
-    "vite": "^5.4.8"
+    "vite": "^5.4.8",
+    "vitest": "^2.1.9"
   }
 }

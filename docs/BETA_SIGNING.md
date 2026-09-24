@@ -65,3 +65,14 @@ Mac, either copy the same identity over (export the cert+key as `.p12` and
 import it) or accept that builds from a different Mac have a different identity
 (testers re-grant once). For consistent persistence, always build betas on the
 same Mac.
+
+## Release builds in CI
+
+Tagged releases (`.github/workflows/release.yml`) are built on GitHub's Macs, so
+they need this same identity: export it once as a `.p12` into the
+`MACOS_BETA_SIGNING_P12_BASE64` / `MACOS_BETA_SIGNING_P12_PASSWORD` Actions
+secrets (steps in `RELEASE.md` → One-time setup). `scripts/import-beta-identity.sh`
+imports it into the keychain path above, and `scripts/release-macos.sh` refuses
+to sign if it is missing — it never lets `sign-macos-beta.sh` create a new
+identity for a release, because in-app updates signed by a different identity
+would reset every tester's permissions.
