@@ -24,17 +24,22 @@ Requires **Apple Silicon Mac** (M1/M2/M3/M4).
 
 ### If macOS blocks the app
 
-macOS may show “Decks Bridge cannot be opened” or “unidentified developer” for private test builds. Try in order:
+Private test builds aren’t notarized by Apple, so macOS blocks them the first time you open them. You may see “Decks Bridge” Not Opened, “Apple could not verify…” or “unidentified developer”. This is expected.
 
-**A. Right-click open (easiest)**
+**A. Allow it in System Settings (macOS 15 Sequoia and newer)**
 
-1. Open **Applications**.
-2. **Right-click** `Decks Bridge` → **Open**.
-3. Click **Open** in the dialog.
+1. Double-click `Decks Bridge` in **Applications**. When the warning appears, click **Done** (not **Move to Trash**).
+2. Open **System Settings** → **Privacy & Security**.
+3. Scroll down to **Security** and click **Open Anyway** next to Decks Bridge. (No button? Do step 1 again. The button only shows for about an hour.)
+4. Confirm: click **Open Anyway** again if asked, and enter your Mac password (or use Touch ID).
+
+Decks Bridge opens, and after that it opens normally. Repeat this once for each new test build.
+
+> **macOS 14 Sonoma or earlier?** The old shortcut still works there: **right-click** `Decks Bridge` in Applications → **Open** → **Open**. Apple removed it in macOS 15.
 
 **B. If macOS says the app is “damaged”**
 
-This usually means Gatekeeper quarantine, not a broken file. In **Terminal**, run:
+This usually means Gatekeeper quarantine, not a broken file. **Open Anyway** isn’t offered in this case. Don’t click **Move to Trash**. Instead, open **Terminal** (press ⌘-Space, type Terminal) and run:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Decks Bridge.app"
