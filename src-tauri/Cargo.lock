@@ -567,6 +567,7 @@ dependencies = [
  "block",
  "libc",
  "objc",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

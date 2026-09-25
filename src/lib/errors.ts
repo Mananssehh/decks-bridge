@@ -1,3 +1,5 @@
+import type { UpdateErrorKind } from "./updater";
+
 /** Map raw errors to DJ-friendly copy — never show stack traces in the UI. */
 
 export function friendlyNetworkError(raw?: string): string {
@@ -43,12 +45,26 @@ export function friendlyDetectionMessage(error: string | null): string | null {
   return "Couldn't read Now Playing. Try Manual mode if this keeps happening.";
 }
 
-export function friendlyUpdateError(raw: string): string {
-  const lower = raw.toLowerCase();
-  if (lower.includes("network") || lower.includes("fetch")) {
-    return "Couldn't download the update. Check your connection and try again.";
+export function friendlyUpdateError(kind: UpdateErrorKind, phase: "check" | "install"): string {
+  switch (kind) {
+    case "network":
+      return phase === "check"
+        ? "Couldn't reach the update server. Check your internet connection and try again."
+        : "The download didn't finish. Check your internet connection and try again.";
+    case "no-release":
+    case "invalid-release":
+      return "Update information isn't available right now. Try again later.";
+    case "signature":
+      return "The update failed its security check, so it was not installed. Try again later.";
+    case "permission":
+      return "Decks Bridge wasn't allowed to replace itself. Try again and approve the password prompt, or install the new version manually.";
+    case "busy":
+      return "An update is already being installed.";
+    case "failed":
+      return phase === "check"
+        ? "Couldn't check for updates. Try again later."
+        : "The update couldn't be installed. Try again after your set.";
   }
-  return "Update installation failed. Try again after your set.";
 }
 
 export function friendlyPairError(raw: string): string {
