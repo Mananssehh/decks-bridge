@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import PairingScreen from "./components/PairingScreen";
 import SetupScreen from "./components/SetupScreen";
 import NowPlaying from "./components/NowPlaying";
+import UpdateAlert from "./components/UpdateAlert";
+import { appUpdater } from "./hooks/useAppUpdate";
 import { loadConfig, clearConfig, resetAndReload, type Config } from "./lib/store";
 import { CrashScreen } from "./main";
 
@@ -53,6 +55,14 @@ export default function App() {
       })
       .catch((err) => console.error("[app] viewer host init failed:", err));
     return () => un?.();
+  }, []);
+
+  // ── Update checks ──────────────────────────────────────────────────────────
+  // App renders only in the main window, so exactly one window checks for
+  // updates: shortly after launch, then periodically while the app is open.
+  useEffect(() => {
+    appUpdater.start();
+    return () => appUpdater.stop();
   }, []);
 
   // ── Startup ──────────────────────────────────────────────────────────────
@@ -140,6 +150,7 @@ export default function App() {
   const shell = (children: React.ReactNode) => (
     <div style={{ background: "#0e0e10", color: "#f0f0f0", minHeight: "100vh" }}>
       {children}
+      <UpdateAlert />
     </div>
   );
 

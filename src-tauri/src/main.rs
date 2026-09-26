@@ -4,11 +4,9 @@
 mod detect_windows;
 mod logging;
 mod sentry;
+mod updater;
 
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
-use tauri::Emitter;
-use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Manager;
@@ -17,33 +15,6 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-
-// ── Pending update cache ──────────────────────────────────────────────────────
-// Holds the Update object returned by check_for_update so install_update can
-// use it directly without a second manifest fetch.
-
-struct PendingUpdate(Mutex<Option<Update>>);
-
-/// Store the pending update, recovering the guard if the mutex was poisoned.
-///
-/// A poisoned lock only means some other thread panicked while holding it; the
-/// Option<Update> inside carries no invariant that a panic could have corrupted.
-/// Unwrapping would turn an unrelated panic into a hard crash of the whole app
-/// mid-set, so we take the value and carry on.
-fn set_pending(pending: &tauri::State<'_, PendingUpdate>, value: Option<Update>) {
-    match pending.0.lock() {
-        Ok(mut guard) => *guard = value,
-        Err(poisoned) => *poisoned.into_inner() = value,
-    }
-}
-
-/// Take the cached update out, recovering from poisoning for the same reason.
-fn take_pending(pending: &tauri::State<'_, PendingUpdate>) -> Option<Update> {
-    match pending.0.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(poisoned) => poisoned.into_inner().take(),
-    }
-}
 
 // ── Return type ───────────────────────────────────────────────────────────────
 
@@ -2658,147 +2629,6 @@ fn get_log_dir() -> String {
     logging::log_dir().display().to_string()
 }
 
-// ── Updater ───────────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateInfo {
-    pub version: String,
-    pub current_version: String,
-    pub body: Option<String>,
-    pub date: Option<String>,
-}
-
-/// Check for an available update.
-/// Returns Some(UpdateInfo) if a newer version is available, None if up-to-date.
-/// Errors (network failure, manifest parse error) are returned as Err(String).
-/// The Update object is cached in PendingUpdate state for install_update to use.
-#[tauri::command]
-async fn check_for_update(
-    app: tauri::AppHandle,
-    pending: tauri::State<'_, PendingUpdate>,
-) -> Result<Option<UpdateInfo>, String> {
-    let current = app.package_info().version.to_string();
-    eprintln!("[update] check — current version: {}", current);
-
-    let updater = app
-        .updater_builder()
-        .build()
-        .map_err(|e| format!("Failed to build updater: {e}"))?;
-
-    match updater.check().await {
-        Ok(Some(update)) => {
-            let info = UpdateInfo {
-                version: update.version.clone(),
-                current_version: current,
-                body: update.body.clone(),
-                date: update.date.map(|d| d.to_string()),
-            };
-            eprintln!(
-                "[update] update available: {} → {}  notes={:?}",
-                info.current_version, info.version, info.body
-            );
-            // Cache the update so install_update doesn't need to re-check.
-            set_pending(&pending, Some(update));
-            Ok(Some(info))
-        }
-        Ok(None) => {
-            eprintln!("[update] already up-to-date");
-            set_pending(&pending, None);
-            Ok(None)
-        }
-        Err(e) => {
-            let msg = format!("{e}");
-            eprintln!("[update] check failed: {msg}");
-            logging::write_line("update", &format!("check failed: {msg}"));
-
-            // ONLY a genuine 404 means "no manifest published for this channel
-            // yet" — that is legitimately 'no update available', not an error.
-            //
-            // Everything else (HTTP 5xx, malformed manifest, signature
-            // verification failure, TLS error) is REAL breakage and must reach
-            // the DJ. Reporting those as "up-to-date" would make a completely
-            // broken update system indistinguishable from a healthy one — and
-            // the updater is the only channel we have to ship a fix, so a silent
-            // failure here is the one failure we can never afford.
-            let manifest_absent = msg.contains("404") || msg.contains("Not Found");
-
-            if manifest_absent {
-                eprintln!("[update] no manifest published — treating as up-to-date");
-                set_pending(&pending, None);
-                return Ok(None);
-            }
-
-            set_pending(&pending, None);
-            Err(msg)
-        }
-    }
-}
-
-/// Download and install the pending update.
-/// Emits tauri events: "update://progress" with `{ downloaded, total }` bytes.
-/// Call relaunch() from the frontend after this resolves.
-/// Uses the cached update from check_for_update — no second manifest fetch.
-#[tauri::command]
-async fn install_update(
-    app: tauri::AppHandle,
-    pending: tauri::State<'_, PendingUpdate>,
-) -> Result<(), String> {
-    eprintln!("[update] starting download + install…");
-
-    // Use cached update. If not present, do a fresh check as fallback.
-    let update = take_pending(&pending);
-
-    let update = match update {
-        Some(u) => {
-            eprintln!("[update] using cached update v{}", u.version);
-            u
-        }
-        None => {
-            eprintln!("[update] no cached update — running fresh check");
-            let updater = app
-                .updater_builder()
-                .build()
-                .map_err(|e| format!("Failed to build updater: {e}"))?;
-            updater
-                .check()
-                .await
-                .map_err(|e| format!("Check failed: {e}"))?
-                .ok_or_else(|| "No update available".to_string())?
-        }
-    };
-
-    eprintln!("[update] downloading v{}…", update.version);
-
-    let app2 = app.clone();
-    update
-        .download_and_install(
-            move |chunk_len, total| {
-                eprintln!(
-                    "[update] progress: {} / {}",
-                    chunk_len,
-                    total.unwrap_or(0)
-                );
-                // Emit progress event to the frontend.
-                let _ = app2.emit(
-                    "update://progress",
-                    serde_json::json!({ "downloaded": chunk_len, "total": total }),
-                );
-            },
-            || {
-                eprintln!("[update] download finished — installing…");
-            },
-        )
-        .await
-        .map_err(|e| {
-            eprintln!("[update] install failed: {e}");
-            format!("{e}")
-        })?;
-
-    eprintln!("[update] install complete — waiting for frontend to relaunch");
-    Ok(())
-}
-
 // ── Windows tray ──────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -2932,7 +2762,7 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .manage(PendingUpdate(Mutex::new(None)))
+        .manage(updater::PendingUpdate::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -2984,8 +2814,8 @@ fn main() {
             check_djay,
             check_serato,
             check_rekordbox,
-            check_for_update,
-            install_update,
+            updater::check_for_update,
+            updater::install_update,
             log_diagnostic,
             get_log_dir,
         ])

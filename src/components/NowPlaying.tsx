@@ -7,7 +7,7 @@ import {
 } from "../lib/store";
 import { sendTrackResilient, getQueueLength } from "../lib/offlineQueue";
 import { type NowPlayingSource } from "../lib/playback";
-import { checkForUpdate, type CheckResult } from "../lib/updater";
+import { appUpdater } from "../hooks/useAppUpdate";
 import { logDiagnostic, getLogDir } from "../lib/log";
 import { isWindows, saveSettings } from "../lib/platform";
 import { resolveSourceLabel, isNoMetadataSource, getAppCompatibility } from "../lib/djSources";
@@ -83,9 +83,7 @@ export default function NowPlaying({ config, onReset, safeMode = false }: Props)
   const [logDir, setLogDir] = useState<string | null>(null);
   const [startWithOs, setStartWithOs] = useState(false);
   const [, setQueuedCount] = useState(0);
-  const [updateBanner, setUpdateBanner] = useState<CheckResult | null>(null);
   const [showUpdatePanel, setShowUpdatePanel] = useState(false);
-  const [deferUpdate, setDeferUpdate] = useState(false);
   const [nowTs, setNowTs] = useState(() => Date.now());
 
   // ── One sync engine drives detection + send; the connection layer handles
@@ -193,21 +191,12 @@ export default function NowPlaying({ config, onReset, safeMode = false }: Props)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Update checks run app-wide (App.tsx); this only tells the update alert
+  // whether a track is live so it can warn before a restart.
   useEffect(() => {
-    if (safeMode) return;
-    let cancelled = false;
-    const t = setTimeout(() => {
-      checkForUpdate()
-        .then((result) => {
-          if (!cancelled && result.status === "available") setUpdateBanner(result);
-        })
-        .catch(() => undefined);
-    }, 30_000);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [safeMode]);
+    appUpdater.setPerforming(isActivePlaying);
+  }, [isActivePlaying]);
+  useEffect(() => () => appUpdater.setPerforming(false), []);
 
   // Surface the sync engine's current send result in the status line.
   const lastSyncState = syncStatus.state;
@@ -434,12 +423,10 @@ export default function NowPlaying({ config, onReset, safeMode = false }: Props)
             </div>
           )}
 
-          {/* Update panel */}
-          {(showUpdatePanel || updateBanner?.status === "available") && (
+          {/* Update panel — the update alert itself is app-wide (App.tsx) */}
+          {showUpdatePanel && (
             <section className="bx-panel">
-              <UpdateChecker showButton isPerforming={isActivePlaying} installWhenIdle={deferUpdate}
-                onDeferred={() => setDeferUpdate(true)} onClearDefer={() => setDeferUpdate(false)}
-                onDismiss={() => { setShowUpdatePanel(false); setUpdateBanner(null); }} />
+              <UpdateChecker onDismiss={() => setShowUpdatePanel(false)} />
             </section>
           )}
 
@@ -457,7 +444,10 @@ export default function NowPlaying({ config, onReset, safeMode = false }: Props)
                   supabaseLatencyMs={supabaseLatencyMs} lastIngestAt={lastIngestAt} pollIntervalMs={POLL_MS}
                   autoDetect={autoDetect} sourceLabel={sourceLabel} detected={detected} logDir={logDir}
                   startWithOs={startWithOs} onStartWithOsChange={setStartWithOs}
-                  onOpenUpdates={() => setShowUpdatePanel(true)} onReset={handleSignOut} />
+                  onOpenUpdates={() => {
+                    setShowUpdatePanel(true);
+                    void appUpdater.checkNow({ manual: true });
+                  }} onReset={handleSignOut} />
                 {lastPost && (
                   <div className="bx-help" style={{ marginTop: 8, fontFamily: "var(--font-mono)" }}>
                     Last send: {lastPost.sentAt} · {lastPost.trackTitle} · HTTP {lastPost.httpStatus || "queued"}

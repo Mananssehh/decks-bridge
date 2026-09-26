@@ -19,7 +19,8 @@
     "build:internal:aarch64": "bash scripts/build-internal.sh aarch64-apple-darwin",
     "build:internal:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-internal-windows.ps1",
     "sync:testers": "bash scripts/sync-tester-folders.sh",
-    "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1"
+    "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-release-windows.ps1",
+    "release:version": "node scripts/release-tools.mjs bump-version"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
