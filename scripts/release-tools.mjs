@@ -418,6 +418,9 @@ export const NOTARIZATION_SECRET_SETS = Object.freeze([
   Object.freeze(["APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]),
 ]);
 
+/** First line of an App Store Connect .p8 key file (assembled, so the source holds no key marker). */
+const P8_FIRST_LINE = `-----${["BEGIN", "PRIVATE", "KEY"].join(" ")}-----`;
+
 /** Every secret name the release workflow may read. */
 export const RELEASE_SECRET_NAMES = Object.freeze([...REQUIRED_SECRETS, ...NOTARIZATION_SECRET_SETS.flat()]);
 
@@ -441,6 +444,20 @@ export function checkReleaseSecrets(env) {
     problems.push(
       'APPLE_SIGNING_IDENTITY must name a "Developer ID Application: …" certificate; ' +
         "Gatekeeper rejects anything else in a downloaded app."
+    );
+  }
+  // A .p12 export is DER, which always starts with an ASN.1 SEQUENCE (0x30).
+  if (has("APPLE_CERTIFICATE")) {
+    const compact = env.APPLE_CERTIFICATE.replace(/\s+/g, "");
+    if (!BASE64.test(compact) || Buffer.from(compact, "base64")[0] !== 0x30) {
+      problems.push("APPLE_CERTIFICATE must be the base64-encoded .p12 export of the Developer ID certificate.");
+    }
+  }
+  // Tauri's docs use APPLE_API_KEY for the key ID; here it is the key file itself.
+  if (has("APPLE_API_KEY") && !env.APPLE_API_KEY.includes(P8_FIRST_LINE)) {
+    problems.push(
+      `APPLE_API_KEY must be the contents of the AuthKey_<key id>.p8 file (it starts with ${P8_FIRST_LINE}); ` +
+        "the key ID goes in APPLE_API_KEY_ID."
     );
   }
   return problems;

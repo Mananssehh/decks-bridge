@@ -501,10 +501,17 @@ describe("required release files", () => {
 });
 
 describe("release secrets", () => {
-  const API_KEY_SET = { APPLE_API_KEY: "k", APPLE_API_KEY_ID: "id", APPLE_API_ISSUER: "iss" };
+  // Shaped like a .p8 without looking like a real key block to secret scanners.
+  const pemLine = (kind) => `-----${kind} ${["PRIVATE", "KEY"].join(" ")}-----`;
+  const FAKE_P8 = `${pemLine("BEGIN")}\nnot-a-real-key\n${pemLine("END")}`;
+  const API_KEY_SET = { APPLE_API_KEY: FAKE_P8, APPLE_API_KEY_ID: "ABC123DEFG", APPLE_API_ISSUER: "iss" };
   const APPLE_ID_SET = { APPLE_ID: "a@b.c", APPLE_APP_SPECIFIC_PASSWORD: "p", APPLE_TEAM_ID: "T" };
+  // Starts like any DER-encoded .p12 (0x30 = ASN.1 SEQUENCE), wrapped like `base64 -i`.
+  const FAKE_P12 = Buffer.concat([Buffer.from([0x30, 0x82, 0x0a, 0x10]), randomBytes(96)])
+    .toString("base64")
+    .replace(/(.{64})/g, "$1\n");
   const BASE = {
-    APPLE_CERTIFICATE: "c2VjcmV0LXAxMg==",
+    APPLE_CERTIFICATE: FAKE_P12,
     APPLE_CERTIFICATE_PASSWORD: "cert-pass-value",
     APPLE_SIGNING_IDENTITY: "Developer ID Application: Example DJ Tools (ABCDE12345)",
     TAURI_SIGNING_PRIVATE_KEY: "tauri-key-value",
@@ -531,7 +538,7 @@ describe("release secrets", () => {
   it("requires one complete notarization set, not pieces of both", () => {
     const problems = checkReleaseSecrets({
       ...BASE,
-      APPLE_API_KEY: "k",
+      APPLE_API_KEY: FAKE_P8,
       APPLE_API_ISSUER: "iss",
       APPLE_ID: "a@b.c",
       APPLE_TEAM_ID: "T",
@@ -552,9 +559,31 @@ describe("release secrets", () => {
     }
   });
 
+  it("rejects a certificate that is not a base64 .p12", () => {
+    for (const cert of ["/Users/dj/Desktop/cert.p12", "-----BEGIN CERTIFICATE-----\nMIIB\n", Buffer.from("not der").toString("base64")]) {
+      expect(checkReleaseSecrets({ ...BASE, ...API_KEY_SET, APPLE_CERTIFICATE: cert })).toEqual([
+        "APPLE_CERTIFICATE must be the base64-encoded .p12 export of the Developer ID certificate.",
+      ]);
+    }
+  });
+
+  it("rejects an API key ID stored where the .p8 key file belongs", () => {
+    expect(checkReleaseSecrets({ ...BASE, ...API_KEY_SET, APPLE_API_KEY: "ABC123DEFG" })).toEqual([
+      expect.stringMatching(/^APPLE_API_KEY must be the contents of the AuthKey_<key id>\.p8 file/),
+    ]);
+    // Not checked when notarizing with an Apple ID instead.
+    expect(checkReleaseSecrets({ ...BASE, ...APPLE_ID_SET })).toEqual([]);
+  });
+
   it("never includes a secret value in its messages", () => {
-    const env = { ...BASE, APPLE_SIGNING_IDENTITY: "Decks Bridge Beta Signing", APPLE_API_KEY: "api-key-value" };
+    const env = {
+      ...BASE,
+      APPLE_SIGNING_IDENTITY: "Decks Bridge Beta Signing",
+      APPLE_CERTIFICATE: "not-a-p12-value",
+      APPLE_API_KEY: "api-key-value",
+    };
     const text = checkReleaseSecrets(env).join("\n");
+    expect(text).not.toBe("");
     for (const value of Object.values(env)) expect(text).not.toContain(value);
   });
 
