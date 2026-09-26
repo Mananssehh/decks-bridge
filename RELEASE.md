@@ -1,69 +1,154 @@
-# Decks Bridge — Cross-Platform Release Guide
+# Decks Bridge — Release Guide
 
-Direct download distribution for **macOS** and **Windows**. Not App Store / Microsoft Store.
+Direct download distribution (not the App Store or Microsoft Store).
 
-A release is published **only** when you push a version tag (`v1.2.3`). The tag
-builds both platforms in GitHub Actions and publishes a GitHub Release, and
-installed apps then offer that version as an in-app update.
+**Initial public release scope: macOS only** — Apple Silicon and Intel builds,
+every one **Developer ID signed, notarized by Apple, stapled, and accepted by
+Gatekeeper**. The Windows app code is unchanged and Windows can still be built
+locally, but the release workflow does not build or publish Windows and
+`latest.json` has no Windows entry until a Windows code-signing certificate is
+in place ([Enabling Windows releases later](#enabling-windows-releases-later)).
+
+A release is published **only** when you push a version tag (`v1.2.3`). Installed
+apps then offer that version as an in-app update.
+
+`RELEASE_CHECKLIST.md` is the per-release checklist; this file explains the
+setup and the pipeline.
 
 ---
 
-## In-app updates: how a release reaches DJs
+## How a release reaches DJs
 
 ```
 git tag v1.2.3 ─▶ .github/workflows/release.yml
-                    ├─ checks: tag = app version, notes in CHANGELOG.md, tests, secrets
-                    ├─ macOS aarch64 + x64: build → sign (beta identity) → DMG/ZIP/.app.tar.gz → minisign .sig
-                    ├─ Windows x64: NSIS installer → .nsis.zip → minisign .sig
-                    └─ publish: verify every .sig → latest.json → draft release → publish
-                                                                       │
+   prepare (Linux)   tag = app version · stable tags are on main · CHANGELOG notes
+                     · every Apple + Tauri secret present · updater key matches the app
+   verify (macOS)    typecheck · lint · tests · frontend build · Rust tests
+   build-macos       Apple Silicon and Intel, each:
+                     Developer ID sign → notarize + staple → DMG (itself signed,
+                     notarized, stapled) · ZIP · updater .app.tar.gz + .sig
+                     → scripts/verify-release.sh checks every artifact
+   publish           tag pushes only: complete artifact set → latest.json from
+                     verified signatures → SHA256SUMS.txt → draft → publish
+                                                        │
 Installed app ──(launch + every 4 h)──▶ github.com/Mananssehh/decks-bridge/releases/latest/download/latest.json
 ```
 
-- **Nothing else publishes.** Pushes and merges to `main` never reach DJs: the
-  app reads `latest.json` from the newest *published, non-pre-release* GitHub
-  Release, and only the tag workflow creates releases. Tags like `v1.2.3-rc.1`
-  become GitHub *pre-releases*, which installed apps ignore; the app also
-  refuses any pre-release version on its own (`src-tauri/src/updater.rs`).
+- **Nothing else publishes.** Pushes and merges to any branch, `main` included,
+  never run the release workflow. The app reads `latest.json` from the newest
+  *published, non-pre-release* GitHub Release, and only a tag push creates
+  releases. Tags like `v1.2.3-rc.1` become GitHub *pre-releases*, which
+  installed apps ignore; the app also refuses any pre-release version on its
+  own (`src-tauri/src/updater.rs`).
 - **When the app checks:** about 10 seconds after launch, then every 4 hours
   while open (30 minutes after a failed check, e.g. offline at a venue). Only the
-  main window checks. DJs can check by hand in Settings → Diagnostics →
-  **Check for updates**.
+  main window checks. DJs can check by hand: Diagnostics → **Check for updates**.
 - **The alert** shows the new version, the installed version and the release
   notes, with **Update Now** and **Remind Me Later**. If a track is playing it
   warns that updating restarts the app.
 - **Remind Me Later** hides that version for 24 hours (remembered across
   restarts). A newer release, or a manual check, shows the alert right away.
-- **Update Now** downloads the update, verifies its signature against the public
-  key in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`) **before**
-  installing, installs it, and restarts. On Windows the installer closes and
-  reopens the app. Pairing and settings are kept (they live outside the app
-  bundle).
-- Code: `src-tauri/src/updater.rs` (check/install commands, stable-only
-  policy), `src/lib/updateController.ts` (scheduling, reminders),
-  `src/components/UpdateAlert.tsx` (the alert). The webview has no direct
-  access to the updater plugin: `src-tauri/capabilities/default.json` grants no
+- **Update Now** downloads the update with progress, verifies its signature
+  against the public key in `src-tauri/tauri.conf.json`
+  (`plugins.updater.pubkey`) **before** installing, installs it and restarts.
+  Pairing and settings are kept (they live outside the app bundle).
+- Code: `src-tauri/src/updater.rs` (check/install commands, stable-only policy,
+  typed errors), `src/lib/updateController.ts` (scheduling, reminders),
+  `src/components/UpdateAlert.tsx` (the alert). The webview has no direct access
+  to the updater plugin: `src-tauri/capabilities/default.json` grants no
   `updater:*` permissions.
+
+### What a release contains
+
+| File | What it is |
+|------|------------|
+| `Decks.Bridge_<version>_aarch64.dmg` / `_x64.dmg` | Download for Apple Silicon / Intel Macs. The disk image and the app inside are both notarized and stapled. |
+| `Decks.Bridge_<version>_aarch64.app.zip` / `_x64.app.zip` | Alternative download (the same notarized app) |
+| `Decks.Bridge_<version>_aarch64.app.tar.gz` / `_x64.app.tar.gz` | In-app update archives |
+| `….app.tar.gz.sig` | Their updater signatures (minisign) |
+| `latest.json` | The update manifest installed apps read: `darwin-aarch64` and `darwin-x86_64` only |
+| `SHA256SUMS.txt` | Checksums of all of the above |
+
+The file set is defined once, in `scripts/release-tools.mjs` (`PLATFORM_FILES`,
+`RELEASE_PLATFORMS`) and `scripts/release-common.sh`; the workflow refuses a
+release with any file missing, empty or unexpected.
 
 ---
 
 ## One-time setup (before the first release)
 
-The workflow fails early, listing the missing secret names, until these exist.
-Add them under **Settings → Secrets and variables → Actions → Repository
-secrets**, or with the GitHub CLI as shown. Never commit them, paste them into
-issues/chats, or echo them in scripts.
+Everything here is a GitHub Actions secret under **Settings → Secrets and
+variables → Actions → Repository secrets**. The workflow stops in its first job,
+before building anything, and lists the missing secret **names** until they
+exist. Never commit them, paste them into issues or chats, or echo them in
+scripts. The `gh secret set` commands below read values from a file or a hidden
+prompt, so nothing lands in your shell history.
 
 | Secret | Required | What it is |
 |--------|----------|------------|
-| `TAURI_SIGNING_PRIVATE_KEY` | yes | Contents of the updater private key file (minisign, from `tauri signer generate`) |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | yes | That key's password (the workflow requires a password-protected key) |
-| `MACOS_BETA_SIGNING_P12_BASE64` | yes | The "Decks Bridge Beta Signing" certificate + private key as a base64 `.p12` |
-| `MACOS_BETA_SIGNING_P12_PASSWORD` | yes | The password you chose when exporting that `.p12` |
-| `WINDOWS_SIGNING_CERT` | no | Base64 `.pfx` for Authenticode (unchanged, optional) |
-| `WINDOWS_SIGNING_CERT_PASSWORD` | no | Its password |
+| `APPLE_CERTIFICATE` | yes | Your **Developer ID Application** certificate and private key, exported as `.p12`, base64-encoded |
+| `APPLE_CERTIFICATE_PASSWORD` | yes | The password you chose when exporting that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | yes | The identity's full name, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_API_KEY` | notarization, option A | Contents of the App Store Connect API key file `AuthKey_<KEYID>.p8` |
+| `APPLE_API_KEY_ID` | notarization, option A | That key's ID |
+| `APPLE_API_ISSUER` | notarization, option A | Your App Store Connect issuer ID |
+| `APPLE_ID` | notarization, option B | Apple ID email of an account on the team |
+| `APPLE_APP_SPECIFIC_PASSWORD` | notarization, option B | An app-specific password for that Apple ID |
+| `APPLE_TEAM_ID` | notarization, option B (recommended with A too) | Your 10-character Team ID; when set, verification also checks every signature comes from this team |
+| `TAURI_SIGNING_PRIVATE_KEY` | yes | Contents of the updater private key file (from `tauri signer generate`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | yes | That key's password (the release requires a password-protected key) |
 
-### 1. Updater signing key
+Notarization needs **one complete option**: A (`APPLE_API_KEY` +
+`APPLE_API_KEY_ID` + `APPLE_API_ISSUER`, recommended) or B (`APPLE_ID` +
+`APPLE_APP_SPECIFIC_PASSWORD` + `APPLE_TEAM_ID`).
+
+### 1. Apple Developer ID certificate
+
+Requires a paid Apple Developer Program membership; only the team's Account
+Holder can create a Developer ID certificate.
+
+1. In Xcode (Settings → Accounts → Manage Certificates → **+** → *Developer ID
+   Application*) or at developer.apple.com → Certificates, create a
+   **Developer ID Application** certificate (not "Apple Development", not
+   "Developer ID Installer").
+2. In Keychain Access → My Certificates, right-click
+   `Developer ID Application: … (TEAMID)` → **Export** → `.p12`, with a new
+   export password.
+3. Store it:
+   ```bash
+   base64 -i ~/Desktop/developer-id.p12 | gh secret set APPLE_CERTIFICATE
+   gh secret set APPLE_CERTIFICATE_PASSWORD      # prompts; paste the export password
+   gh secret set APPLE_SIGNING_IDENTITY          # prompts; paste the name, e.g. Developer ID Application: Your Name (TEAMID)
+   rm ~/Desktop/developer-id.p12
+   ```
+   `security find-identity -v -p codesigning` shows the exact name. Keep the
+   `.p12` only in the secret and your password manager: it is the key that
+   makes macOS trust an app as yours.
+
+### 2. Notarization credentials
+
+**Option A — App Store Connect API key (recommended).** App Store Connect →
+Users and Access → Integrations → **Team Keys** → generate a key with the
+*Developer* role. Download `AuthKey_<KEYID>.p8` (Apple lets you download it only
+once) and note the Key ID and Issuer ID shown on that page.
+
+```bash
+gh secret set APPLE_API_KEY < ~/Downloads/AuthKey_ABC123DEFG.p8   # the file itself, not base64
+gh secret set APPLE_API_KEY_ID                                    # prompts; e.g. ABC123DEFG
+gh secret set APPLE_API_ISSUER                                    # prompts; the issuer UUID
+gh secret set APPLE_TEAM_ID                                       # optional here; prompts
+```
+
+The workflow writes the key to `$RUNNER_TEMP/AuthKey.p8`, passes that exact path
+to the build as `APPLE_API_KEY_PATH`, and deletes it at the end of the job.
+(Tauri's own docs use `APPLE_API_KEY` for the key *ID*; here it is the key
+*file*, and the check catches the mix-up before building.)
+
+**Option B — Apple ID.** Create an app-specific password at account.apple.com →
+Sign-In and Security → App-Specific Passwords, then set `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` the same way.
+
+### 3. Updater signing key
 
 Installed apps only accept updates signed by the private key that matches the
 public key committed in `src-tauri/tauri.conf.json` (key ID `EE94C01FAE1F465D`).
@@ -93,58 +178,76 @@ Put that public key into `src-tauri/tauri.conf.json` → `plugins.updater.pubkey
 and commit it. For local signing, point `.env.signing` (gitignored) at the new
 key or rename it to `~/.tauri/decks-bridge.key`.
 
-**Store it** (the GitHub CLI reads from stdin, so nothing lands in shell history):
+**Store it:**
 
 ```bash
 gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/decks-bridge.key   # or decks-bridge-updater.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD                      # prompts; paste the password
 ```
 
-Also back up the key file and password in your password manager. **If the key
-or password is lost, installed apps can never accept another update** — every
-DJ would have to reinstall manually.
+The workflow signs a throwaway file with this key and verifies it against
+`plugins.updater.pubkey` before any build starts, so a wrong key or password
+fails in a minute, not after the macOS builds. Back up the key file and password
+in your password manager: **if either is lost, installed apps can never accept
+another update** — every DJ would have to reinstall manually.
 
-### 2. macOS signing identity (keeps DJs' permissions across updates)
-
-macOS ties Accessibility (djay Pro, rekordbox) and Automation (Music, Spotify)
-grants to the app's code-signing identity. CI must sign with the **same**
-self-signed "Decks Bridge Beta Signing" identity your Mac already uses
-(`docs/BETA_SIGNING.md`); a new identity would make every DJ re-grant
-permissions after updating, and Now Playing detection would stop until they do.
-The workflow refuses to build without it rather than create a new one.
-
-On the Mac that builds the betas:
-
-```bash
-read -rs P12_PASSWORD   # type a NEW export password, press Enter (not echoed)
-security unlock-keychain -p decks-bridge-beta ~/Library/Keychains/decks-bridge-beta.keychain-db
-security export -k ~/Library/Keychains/decks-bridge-beta.keychain-db \
-  -t identities -f pkcs12 -P "$P12_PASSWORD" -o ~/Desktop/decks-bridge-beta.p12
-base64 -i ~/Desktop/decks-bridge-beta.p12 | gh secret set MACOS_BETA_SIGNING_P12_BASE64
-printf '%s' "$P12_PASSWORD" | gh secret set MACOS_BETA_SIGNING_P12_PASSWORD
-rm ~/Desktop/decks-bridge-beta.p12; unset P12_PASSWORD
-```
-
-(Allow the keychain access prompt if macOS shows one; the beta keychain password
-is `decks-bridge-beta`, as set by `scripts/create-beta-signing-cert.sh`.) The
-`.p12` is a real private key: anyone holding it can sign apps that macOS treats
-as Decks Bridge for permission purposes. Keep it only in the GitHub secret and
-your password manager.
-
-To confirm CI uses the same identity as the installed builds, compare the
-`designated => … certificate leaf = H"…"` line printed by the workflow's
-"Sign and package" step with:
-
-```bash
-codesign -d -r- "/Applications/Decks Bridge.app"
-```
-
-### 3. Optional hardening (GitHub settings — your call)
+### 4. Optional hardening (GitHub settings — your call)
 
 - A **tag ruleset** restricting who can create `v*` tags, since pushing a tag
   publishes to every DJ.
 - Keep `main` protected so stable tags (which must point at `main`) only ever
   contain reviewed code.
+- An `environment` with required reviewers on the `publish` job would add a
+  manual approval before anything is published.
+
+---
+
+## After merging: dry-run sequence
+
+`workflow_dispatch` only works once the workflow is on the default branch, so
+these steps start **after** this pipeline is merged to `main`. None of them
+publishes anything until step 3.
+
+0. **Fail-closed check (before adding secrets, optional).** Actions → Release →
+   **Run workflow** on `main`. Expected: `prepare` fails at *Release secrets are
+   configured* and lists the missing secret names; `verify`, `build-macos` and
+   `publish` never start. This proves a missing credential stops the release
+   before any build.
+1. **Add the secrets** (One-time setup above).
+2. **Full dry run.** Run workflow on `main` again. Expected: `prepare`, `verify`
+   and both `build-macos` jobs pass; `publish` is **skipped** (manual runs never
+   publish). Download the `macos-aarch64` and `macos-x64` workflow artifacts and,
+   on a Mac:
+   ```bash
+   spctl -a -vvv -t open --context context:primary-signature Decks.Bridge_*_aarch64.dmg   # accepted, Notarized Developer ID
+   xcrun stapler validate Decks.Bridge_*_aarch64.dmg
+   ```
+   Then install each DMG on a Mac that did not build it — Apple Silicon and, if
+   you can, a real Intel Mac — by opening it from the downloaded file: no
+   "damaged" or "unidentified developer" dialog, no Terminal workaround.
+3. **Pre-release rehearsal.** On a branch, `npm run release:version -- 0.2.0-rc.1`,
+   add a `## [0.2.0-rc.1]` section to `CHANGELOG.md`, commit, and push tag
+   `v0.2.0-rc.1`. Expected: a GitHub **pre-release** with the eight macOS files,
+   `latest.json` (two `darwin-*` entries) and `SHA256SUMS.txt`, not marked
+   Latest. Installed apps ignore it. Delete the pre-release (and its tag) when
+   done, or keep it for reference.
+4. **First stable release.** Follow [Publishing a release](#publishing-a-release)
+   with `0.2.0`. Testers on 0.1.0 install it manually once (0.1.0 cannot
+   auto-update; see Limitations).
+5. **End-to-end update test (required before relying on updates).**
+   1. Install `0.2.0` from its DMG on a Mac; pair it and grant permissions.
+   2. Publish `0.2.1` (stable).
+   3. Open `0.2.0`: within ~10 s the alert shows 0.2.1 and its notes.
+   4. **Remind Me Later**, quit and reopen: no alert. Diagnostics → **Check for
+      updates**: the alert is back.
+   5. **Update Now**: progress, then the app restarts as 0.2.1. Check the
+      version, that pairing survived, and that djay/rekordbox/Music detection
+      still works without re-granting permissions.
+   6. Repeat on an Intel Mac.
+
+The automated checks cover the logic (Rust and Vitest suites, the release-tool
+and policy tests) and every signature is verified against the app's public key,
+but only this test proves the real download → verify → install → restart path.
 
 ---
 
@@ -167,9 +270,11 @@ codesign -d -r- "/Applications/Decks Bridge.app"
    git push origin v0.2.0
    ```
 5. Watch **Actions → Release**. When it finishes, the GitHub Release `v0.2.0`
-   holds the DMG/ZIP per architecture, the Windows installer, the updater
-   archives with `.sig` files, `latest.json` and `SHA256SUMS.txt`. Installed
-   apps offer the update at their next launch or within about 4 hours.
+   holds the files listed above and is marked Latest. Installed apps offer the
+   update at their next launch or within about 4 hours.
+
+Always tag a higher version than the current Latest release: the newest
+*published* stable release is what installed apps read.
 
 **If the workflow fails,** nothing has been published: the release is created as
 a draft and only made public in the last step. Fix the problem, then either use
@@ -180,123 +285,147 @@ that is already published.
 
 ---
 
-## Testing before you rely on it
+## What the release workflow checks
 
-- **Dry run:** Actions → Release → **Run workflow** on `main`. It builds, signs
-  and verifies everything and uploads the files as workflow artifacts, but never
-  publishes. This is the way to confirm the secrets work.
-- **Pre-release:** bump to e.g. `0.2.0-rc.1`, add a `## [0.2.0-rc.1]` section,
-  and push tag `v0.2.0-rc.1`. It publishes a GitHub pre-release you can download
-  and install; installed apps ignore it. (Windows packaging of pre-release
-  version numbers has not been tried.)
-- **End-to-end updater test (not done yet — required before trusting it):**
-  1. Publish a first updater-capable release (e.g. `0.2.0`) and install its DMG on
-     a Mac; pair it and grant permissions.
-  2. Publish `0.2.1`.
-  3. Open `0.2.0`: within ~10 s the alert shows 0.2.1 and its notes.
-  4. **Remind Me Later**, quit and reopen: no alert. Settings → Diagnostics →
-     **Check for updates**: the alert is back.
-  5. **Update Now**: progress, then the app restarts as 0.2.1 — check Settings
-     shows 0.2.1, pairing survived, and djay/rekordbox/Music detection still
-     works without re-granting permissions.
-  6. Repeat on an Intel Mac and on Windows if you support them.
-
-The automated checks cover the logic (Rust and Vitest suites) and CI verifies
-every signature against the app's public key, but only this manual test proves
-the real download → install → restart path on a real machine.
-
----
-
-## What the release workflow checks before publishing
-
-- The tag equals the version in all version files, and a stable tag points at a
+Before building (`prepare`):
+- The tag equals the version in every version file, and a stable tag points at a
   commit on `main`.
 - `CHANGELOG.md` has a section for the version.
-- All required secrets exist (names only; values are never printed).
-- Typecheck, frontend tests, production frontend build, Rust tests.
-- macOS, per architecture: the binary's CPU architecture matches the target,
-  `CFBundleShortVersionString` equals the release version (otherwise the app
-  would re-offer the same update forever), the signature is valid and comes
-  from "Decks Bridge Beta Signing" (never ad-hoc or a new identity), and the app
-  extracted back out of the updater archive passes the same checks.
-- Every updater archive's signature verifies against `plugins.updater.pubkey`,
-  once in the build job and again when `latest.json` is generated — so a
-  release installed apps could not accept is never published.
-- Signing secrets are exposed only to the steps that use them; the build steps
-  (which run npm scripts) never see them.
+- Every required Apple and Tauri secret is set, in the expected form (names
+  only; values are never printed), and the updater key matches
+  `plugins.updater.pubkey`.
+
+Before packaging, per architecture (`build-macos`, `scripts/build-release.sh`):
+- `scripts/preflight-signing.sh`: a Developer ID Application identity is in the
+  keychain and notarization credentials exist.
+- The app is Developer ID signed with the hardened runtime, notarized, stapled,
+  and Gatekeeper (`spctl`) accepts it as *Notarized Developer ID* — on a runner
+  where Gatekeeper assessments are verified to be on.
+- Its executable is the architecture of the requested target (`lipo`), never
+  the runner's, and its `CFBundleShortVersionString` equals the release version.
+
+After packaging (`scripts/verify-release.sh`):
+- The DMG itself is Developer ID signed, notarized, stapled and accepted.
+- The app inside the DMG, the ZIP and the updater tarball each pass all the app
+  checks above.
+- The updater signature verifies against `plugins.updater.pubkey`.
+- The job's files are exactly this architecture's four files.
+
+Before publishing (`publish`, tag pushes only):
+- Both architectures are present, nothing missing or extra.
+- `latest.json` is generated only after every updater signature verifies again.
+- The final set (with `latest.json` and `SHA256SUMS.txt`) is checked, uploaded
+  to a draft, and only then published.
+
+Throughout: the token is read-only except in `publish` (`contents: write`),
+checkouts do not keep credentials, each secret is exposed only to the steps that
+use it, and no `if:` reads secrets. `scripts/release-policy.mjs` encodes these
+rules and `scripts/release-policy.test.mjs` (part of `npm test`) fails if the
+workflow or the release scripts drift from them — for example a branch trigger,
+a self-signed or ad-hoc step, a missing gate, or an unchecked secret.
 
 ---
 
-## Limitations of the current signing setup
+## Enabling Windows releases later
 
-Signing is unchanged: macOS builds use the self-signed "Decks Bridge Beta
-Signing" identity (not Apple Developer ID, not notarized); Windows builds are
-Authenticode-signed only if `WINDOWS_SIGNING_CERT` is set.
+The Windows app code and build scripts are kept as they are. To publish Windows
+once you have a Windows code-signing certificate (OV/EV Authenticode, or a cloud
+signing service):
 
-1. **First install still hits Gatekeeper.** A DMG downloaded in a browser is
-   quarantined, and macOS rejects the self-signed app ("damaged" / "can't be
-   opened"). Testers follow `TEST_INSTALL.md` (the `xattr` command, or System
-   Settings → Privacy & Security → Open Anyway). Only Developer ID signing plus
-   notarization (paid Apple Developer Program) removes this.
-2. **In-app updates should not hit Gatekeeper.** The app downloads the update
-   itself, so the new bundle is not quarantined. Expected, but not yet verified
-   on a real Mac — confirm in the end-to-end test.
-3. **Permissions survive only with the same identity.** See setup step 2. If the
-   identity ever changes (new Mac, deleted keychain), DJs re-grant
-   Accessibility/Automation once after that update.
+1. **Make the Windows build fail closed.** `scripts/build-release-windows.ps1`
+   currently skips Authenticode signing silently when `signtool` or
+   `WINDOWS_SIGNING_CERT` is missing, and `package-windows-artifacts.ps1` skips
+   the updater signature when `TAURI_SIGNING_PRIVATE_KEY` is missing. Both must
+   become errors, and the build should verify the result
+   (`signtool verify /pa /v` on the installer and portable exe; the updater
+   signature with `node scripts/release-tools.mjs verify-signature`).
+2. **Secrets.** Add `WINDOWS_SIGNING_CERT` (base64 `.pfx`) and
+   `WINDOWS_SIGNING_CERT_PASSWORD`, and add them to `REQUIRED_SECRETS` in
+   `scripts/release-tools.mjs` so `check-secrets` requires them.
+3. **Workflow.** Add a `build-windows` job (`windows-latest`, needs `prepare` and
+   `verify`) that builds, verifies the signatures, renames the outputs to the
+   names in `PLATFORM_FILES["windows-x86_64"]`
+   (`Decks.Bridge_<version>_x64-setup.exe`, `…_x64-setup.nsis.zip` + `.sig`,
+   `…_x64-portable.zip`), checks them with
+   `check-release-files --platforms windows-x86_64` and uploads them; make
+   `publish` need it and copy its files in.
+4. **Manifest.** Add `"windows-x86_64"` to `RELEASE_PLATFORMS` in
+   `scripts/release-tools.mjs`: `latest.json` then lists Windows and
+   `check-release-files` requires its files.
+5. **Policy.** Update `scripts/release-policy.mjs` (it rejects Windows jobs
+   today) to require the Windows gates instead, and its tests.
+6. Dry run, pre-release rehearsal and an end-to-end update test on Windows, as
+   for macOS. Until then, Windows installs find no Windows entry in
+   `latest.json`: background checks fail quietly (logged, retried) and a manual
+   check says update information isn't available.
+
+---
+
+## Local builds
+
+```
+release/
+├── v{version}/mac/     # PUBLIC: Decks.Bridge_{version}_{aarch64|x64}.{dmg,app.zip,app.tar.gz,app.tar.gz.sig}
+├── mac/                # copies of those public files (all versions built here)
+├── internal/           # INTERNAL ONLY — self-signed/ad-hoc, never published or synced
+│   ├── v{version}/mac/
+│   ├── mac/
+│   └── testers-mac/
+├── windows/            # Windows builds (made on Windows; not published)
+├── v{version}/windows/
+└── SHA256SUMS.txt      # scripts/hash-release.sh
+```
+
+- **Production, same pipeline as CI** (needs the Developer ID certificate in
+  your keychain and credentials in `.env.signing`, see `.env.signing.example`;
+  locally the API key is a file, `APPLE_API_KEY_PATH`):
+  ```bash
+  npm run build:release                          # this Mac's architecture
+  bash scripts/build-release.sh x86_64-apple-darwin
+  npm run sync:testers                           # copy the notarized build into "decks bridge Mac"
+  ```
+  `sync:testers` copies only builds that pass the same notarization checks.
+- **Internal beta** (self-signed "Decks Bridge Beta Signing", local testing only;
+  `docs/BETA_SIGNING.md`): `npm run build:internal`. Output stays under
+  `release/internal/` and is never published or synced to shareable folders.
+  Send `TEST_INSTALL.md` with it; testers need the Gatekeeper workaround it
+  describes.
+- **Windows** (on Windows 10/11 x64): `npm run build:internal:windows` (unsigned
+  internal build, `TEST_INSTALL_WINDOWS.md`) or `npm run build:release:windows`
+  (see "Enabling Windows releases later" before distributing it).
+
+---
+
+## Limitations
+
+1. **Not yet run on GitHub's macOS runners.** The signing, notarization,
+   stapling and Gatekeeper steps have been checked with stub tests and
+   ShellCheck but have never produced a real notarized build. The dry-run
+   sequence above is the first real run.
+2. **Builds already installed (0.1.0) cannot auto-update.** They poll the old
+   endpoint (`raw.githubusercontent.com/Mananssehh/decks-bridge-releases/main/update-manifest.json`,
+   a repository that does not exist). Testers install the first
+   updater-capable release manually once; later releases arrive in-app.
+3. **Testers re-grant permissions once.** macOS ties Accessibility (djay Pro,
+   rekordbox) and Automation (Music, Spotify) grants to the signing identity.
+   Moving from a self-signed beta build to the first Developer ID build changes
+   it, so testers re-grant once; Developer ID updates after that keep the grants
+   (the requirement is tied to your Team ID). Confirm in the end-to-end test.
 4. **Replacing the app may prompt.** If the DJ's account cannot write to
-   `/Applications`, macOS asks for an administrator password. On macOS 13+,
-   the "App Management" privacy setting may also ask to allow Decks Bridge to
-   update apps, because a self-signed app has no Apple Team ID. Unverified —
-   check during the end-to-end test.
-5. **Windows:** without `WINDOWS_SIGNING_CERT` the installer is unsigned
-   (SmartScreen on first install). Updates run the per-machine NSIS installer in
-   passive mode, which needs a UAC prompt. The Windows update path is untested.
-6. **Intel Macs:** x64 builds are produced as before but have not been tested on
-   Intel hardware.
-7. **Mini/Pill:** the alert lives in the main window. A DJ using only Mini or
-   Pill sees it when they return to the main window.
-8. **Repository visibility:** the app downloads updates from this repository's
+   `/Applications`, macOS asks for an administrator password during the update.
+5. **Repository visibility.** The app downloads updates from this repository's
    GitHub Releases, which works because the repository is public (its GitHub
    description says "Private"). If you make it private, installed apps can no
    longer fetch updates: first ship an update whose endpoint points at a public
    releases repository, then change visibility.
-9. **Builds already installed (0.1.0) cannot auto-update.** They poll the old
-   endpoint (`raw.githubusercontent.com/Mananssehh/decks-bridge-releases/main/update-manifest.json`,
-   a repository that does not exist). Testers install the first updater-capable
-   release manually once; later releases then arrive in-app.
-10. **No downgrades / rollback.** Installed apps never move to an older version.
-    To stop a bad release spreading, delete it or mark it as a pre-release (the
-    endpoint then serves the previous release); fix forward with a higher
-    version.
-
----
-
-## Release layout (local builds)
-
-```
-release/
-├── upload/                       # release-macos.sh output (same files CI publishes)
-├── mac/                          # Latest macOS beta/production copies
-│   ├── Decks Bridge.dmg
-│   └── Decks Bridge.zip
-├── windows/                      # Latest Windows copies (built on Windows)
-│   ├── Decks Bridge Setup.exe
-│   ├── Decks Bridge Portable.exe
-│   ├── Decks Bridge.zip
-│   └── Decks Bridge Setup.nsis.zip
-├── v{version}/mac/               # Versioned macOS artifacts
-├── v{version}/windows/           # Versioned Windows artifacts
-└── SHA256SUMS.txt                # Checksums (scripts/hash-release.sh)
-```
-
-To reproduce the CI macOS release locally (on the Mac with the beta identity):
-
-```bash
-bash scripts/release-macos.sh build aarch64-apple-darwin
-bash scripts/release-macos.sh package aarch64-apple-darwin
-bash scripts/release-macos.sh sign-updater aarch64-apple-darwin   # uses .env.signing or ~/.tauri/decks-bridge.key
-```
+6. **No downgrades or rollback.** Installed apps never move to an older version.
+   To stop a bad release spreading, delete it or mark it as a pre-release (the
+   endpoint then serves the previous release); fix forward with a higher version.
+7. **Intel Macs:** built and verified as x86_64 in CI, but not yet tested on
+   Intel hardware.
+8. **Mini/Pill:** the alert lives in the main window. A DJ using only Mini or
+   Pill sees it when they return to the main window.
+9. **Windows:** not published yet (see above).
 
 ---
 
@@ -305,16 +434,16 @@ bash scripts/release-macos.sh sign-updater aarch64-apple-darwin   # uses .env.si
 | Feature | macOS | Windows |
 |---------|-------|---------|
 | Pairing (6-digit code) | ✅ | ✅ |
-| Deep link (`decksbridge://`) | ✅ | ✅ (registered by NSIS installer) |
+| Deep link (`decksbridge://`) | ✅ (asks before connecting) | ✅ (registered by NSIS installer) |
 | Supabase bridge-pair | ✅ | ✅ |
 | now-playing-ingest | ✅ | ✅ |
 | Auto Now Playing detection | MediaRemote + AppleScript | SMTC (System Media Transport Controls) |
 | Manual track entry | ✅ | ✅ |
 | Reconnect / heartbeat | ✅ | ✅ |
-| Background operation | Dock | System tray |
+| Background operation | Dock (closing the window hides it) | System tray |
 | Minimize to tray | — | ✅ (close hides to tray) |
 | Start with OS (optional) | ✅ (autostart plugin) | ✅ (autostart plugin) |
-| In-app updater | ✅ (see Limitations) | ✅ (untested) |
+| Public release + in-app updates | ✅ (Developer ID + notarized; see Limitations) | Not published yet |
 | File logging | `~/Library/Logs/Decks Bridge/` | `%LOCALAPPDATA%\Decks Bridge\Logs\` |
 | Sentry (optional) | Set `SENTRY_DSN` | Set `SENTRY_DSN` |
 
@@ -325,76 +454,8 @@ files above.
 
 - **macOS detection** uses MediaRemote, Apple Music AppleScript, and djay accessibility fallbacks.
 - **Windows detection** uses SMTC only — no djay-specific AX scraping.
-- **macOS beta** builds are signed with the self-signed beta identity; testers bypass Gatekeeper (see `TEST_INSTALL.md`).
-- **Windows beta** builds are unsigned; testers bypass SmartScreen (see `TEST_INSTALL_WINDOWS.md`).
 - **Windows** requires **WebView2** (pre-installed on most Windows 10/11; NSIS installer bootstraps if missing).
 - **Portable Windows exe** does not register `decksbridge://` — use the NSIS installer for deep links.
-
----
-
-## macOS builds (local)
-
-### Internal beta (self-signed, private DJ testing)
-
-```bash
-cd "/Users/manansseh/Desktop/Decks Bridge"
-npm run build:internal
-```
-
-Output: `release/mac/Decks Bridge.dmg`, `.zip`, `.app`
-
-Send **`TEST_INSTALL.md`** with the DMG.
-
-### Production (Developer ID + notarization — not set up yet)
-
-```bash
-cp .env.signing.example .env.signing
-# Fill Apple + minisign credentials
-npm run build:release
-```
-
-Output: `release/v{version}/mac/` + copies in `release/mac/`. Requires an Apple
-Developer ID certificate and notarization credentials. The tag workflow does
-not use this path; it publishes the self-signed builds described above.
-
----
-
-## Windows builds (local)
-
-Run on **Windows 10/11 x64** (local machine or CI).
-
-### Internal beta
-
-```powershell
-cd "C:\path\to\Decks Bridge"
-npm run build:internal:windows
-```
-
-Output: `release/windows/Decks Bridge Setup.exe`, `Decks Bridge Portable.exe`, `Decks Bridge.zip`
-
-Send **`TEST_INSTALL_WINDOWS.md`** with the installer.
-
-### Production
-
-```powershell
-# Optional: set WINDOWS_SIGNING_CERT + WINDOWS_SIGNING_CERT_PASSWORD for Authenticode
-npm run build:release:windows
-```
-
-Generates a signed updater archive when `TAURI_SIGNING_PRIVATE_KEY` is set.
-
----
-
-## Release checklist
-
-- [ ] One-time secrets configured (see above); a dry run (**Run workflow**) passes
-- [ ] `npm run release:version -- X.Y.Z` committed
-- [ ] `CHANGELOG.md` has `## [X.Y.Z] - date` with DJ-facing notes
-- [ ] Pairing + ingest tested on macOS (and Windows if shipping it)
-- [ ] Merged to `main`; tag `vX.Y.Z` pushed from `main`
-- [ ] Release workflow green; GitHub Release has `latest.json`
-- [ ] An older installed build shows the update alert and updates cleanly
-- [ ] `TEST_INSTALL.md` / `TEST_INSTALL_WINDOWS.md` sent to new testers (first install only)
 
 ---
 
@@ -404,6 +465,7 @@ Release scripts verify:
 
 - No `.git` in app bundles
 - No AppleDouble `._*` files (macOS packaging)
+- No placeholder URLs in the binary
 - No embedded signing secrets (use `.env.signing`, gitignored, or Actions secrets)
 - Config stored locally (localStorage / AppData), not in the binary
 
