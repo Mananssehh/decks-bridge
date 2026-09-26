@@ -1,17 +1,26 @@
+import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  NOTARIZATION_SECRET_SETS,
+  PLATFORM_FILES,
+  RELEASE_PLATFORMS,
+  REQUIRED_SECRETS,
   ROOT,
-  UPDATER_ARTIFACTS,
   buildLatestJson,
   bumpVersion,
+  checkReleaseFiles,
+  checkReleaseSecrets,
   checkReleaseVersion,
   decodeUpdaterPublicKey,
+  expectedReleaseFiles,
   extractReleaseNotes,
+  parsePlatforms,
   parseReleaseVersion,
+  platformReleaseFiles,
   readUpdaterPublicKey,
   readVersions,
   rfc3339,
@@ -250,20 +259,23 @@ describe("updater signatures", () => {
 });
 
 describe("latest.json", () => {
-  function writeArtifacts(dir, version, key, { skip = [], corrupt = [] } = {}) {
-    for (const { platform, asset } of UPDATER_ARTIFACTS) {
+  const ALL_PLATFORMS = Object.keys(PLATFORM_FILES);
+
+  function writeArtifacts(dir, version, key, { platforms = ALL_PLATFORMS, skip = [], corrupt = [] } = {}) {
+    for (const platform of platforms) {
       if (skip.includes(platform)) continue;
+      const asset = PLATFORM_FILES[platform].updater(version);
       const data = randomBytes(2048);
-      writeFileSync(join(dir, asset(version)), data);
+      writeFileSync(join(dir, asset), data);
       const signed = corrupt.includes(platform) ? Buffer.concat([data, Buffer.from("!")]) : data;
-      writeFileSync(join(dir, `${asset(version)}.sig`), `${signLikeTauri(key, signed)}\n`);
+      writeFileSync(join(dir, `${asset}.sig`), `${signLikeTauri(key, signed)}\n`);
     }
   }
 
-  it("lists every platform with its signature and release download URL", () => {
+  it("lists only the macOS platforms by default, with signatures and release download URLs", () => {
     const key = makeKey();
     const dir = tempDir();
-    writeArtifacts(dir, "0.2.0", key);
+    writeArtifacts(dir, "0.2.0", key); // a Windows archive in the folder must not be listed
 
     const manifest = buildLatestJson({
       version: "0.2.0",
@@ -274,16 +286,43 @@ describe("latest.json", () => {
       pubDate: new Date("2026-10-01T12:34:56.789Z"),
     });
 
+    expect(RELEASE_PLATFORMS).toEqual(["darwin-aarch64", "darwin-x86_64"]);
     expect(manifest.version).toBe("0.2.0");
     expect(manifest.notes).toBe("- Update alerts");
     expect(manifest.pub_date).toBe("2026-10-01T12:34:56Z");
-    expect(Object.keys(manifest.platforms).sort()).toEqual(["darwin-aarch64", "darwin-x86_64", "windows-x86_64"]);
+    expect(Object.keys(manifest.platforms).sort()).toEqual(["darwin-aarch64", "darwin-x86_64"]);
     expect(manifest.platforms["darwin-aarch64"].url).toBe(
       "https://github.com/Mananssehh/decks-bridge/releases/download/v0.2.0/Decks.Bridge_0.2.0_aarch64.app.tar.gz"
     );
-    expect(manifest.platforms["windows-x86_64"].url).toMatch(/\/v0\.2\.0\/Decks\.Bridge_0\.2\.0_x64-setup\.nsis\.zip$/);
+    expect(manifest.platforms["darwin-x86_64"].url).toBe(
+      "https://github.com/Mananssehh/decks-bridge/releases/download/v0.2.0/Decks.Bridge_0.2.0_x64.app.tar.gz"
+    );
     const sig = readFileSync(join(dir, "Decks.Bridge_0.2.0_x64.app.tar.gz.sig"), "utf8").trim();
     expect(manifest.platforms["darwin-x86_64"].signature).toBe(sig);
+  });
+
+  it("does not need Windows artifacts for a macOS-only release", () => {
+    const key = makeKey();
+    const dir = tempDir();
+    writeArtifacts(dir, "0.2.0", key, { platforms: RELEASE_PLATFORMS });
+    const manifest = buildLatestJson({ version: "0.2.0", repo: "o/r", notes: "n", assetsDir: dir, pubkey: key.pubkey });
+    expect(manifest.platforms["windows-x86_64"]).toBeUndefined();
+  });
+
+  it("adds Windows only when asked to, once Windows publishing is enabled", () => {
+    const key = makeKey();
+    const dir = tempDir();
+    writeArtifacts(dir, "0.2.0", key);
+    const manifest = buildLatestJson({
+      version: "0.2.0",
+      repo: "o/r",
+      notes: "n",
+      assetsDir: dir,
+      pubkey: key.pubkey,
+      platforms: ALL_PLATFORMS,
+    });
+    expect(Object.keys(manifest.platforms).sort()).toEqual(["darwin-aarch64", "darwin-x86_64", "windows-x86_64"]);
+    expect(manifest.platforms["windows-x86_64"].url).toMatch(/\/v0\.2\.0\/Decks\.Bridge_0\.2\.0_x64-setup\.nsis\.zip$/);
   });
 
   it("refuses to publish when an artifact is missing", () => {
@@ -298,10 +337,10 @@ describe("latest.json", () => {
   it("refuses to publish an artifact whose signature does not verify", () => {
     const key = makeKey();
     const dir = tempDir();
-    writeArtifacts(dir, "0.2.0", key, { corrupt: ["windows-x86_64"] });
+    writeArtifacts(dir, "0.2.0", key, { corrupt: ["darwin-aarch64"] });
     expect(() =>
       buildLatestJson({ version: "0.2.0", repo: "o/r", notes: "n", assetsDir: dir, pubkey: key.pubkey })
-    ).toThrow(/x64-setup\.nsis\.zip: The signature does not match/);
+    ).toThrow(/aarch64\.app\.tar\.gz: The signature does not match/);
   });
 
   it("refuses artifacts signed with a key the app does not trust", () => {
@@ -320,9 +359,214 @@ describe("latest.json", () => {
     expect(() => buildLatestJson({ version: "0.2.0", repo: "nope", notes: "", assetsDir: ".", pubkey })).toThrow(
       /Invalid repository/
     );
+    expect(() =>
+      buildLatestJson({ version: "0.2.0", repo: "o/r", notes: "", assetsDir: ".", pubkey, platforms: ["linux-x86_64"] })
+    ).toThrow(/Unknown platform\(s\): linux-x86_64/);
+    expect(() =>
+      buildLatestJson({ version: "0.2.0", repo: "o/r", notes: "", assetsDir: ".", pubkey, platforms: [] })
+    ).toThrow(/No platforms/);
   });
 
   it("formats dates as RFC 3339 without fractions", () => {
     expect(rfc3339(new Date("2026-01-02T03:04:05.678Z"))).toBe("2026-01-02T03:04:05Z");
+  });
+});
+
+describe("required release files", () => {
+  const MAC_FILES_020 = [
+    "Decks.Bridge_0.2.0_aarch64.app.tar.gz",
+    "Decks.Bridge_0.2.0_aarch64.app.tar.gz.sig",
+    "Decks.Bridge_0.2.0_aarch64.app.zip",
+    "Decks.Bridge_0.2.0_aarch64.dmg",
+    "Decks.Bridge_0.2.0_x64.app.tar.gz",
+    "Decks.Bridge_0.2.0_x64.app.tar.gz.sig",
+    "Decks.Bridge_0.2.0_x64.app.zip",
+    "Decks.Bridge_0.2.0_x64.dmg",
+  ];
+
+  function releaseDir(files) {
+    const dir = tempDir();
+    for (const name of files) writeFileSync(join(dir, name), `contents of ${name}`);
+    return dir;
+  }
+
+  it("is the DMG, ZIP, updater archive and signature for Apple Silicon and Intel", () => {
+    expect(expectedReleaseFiles({ version: "0.2.0" })).toEqual(MAC_FILES_020);
+    expect(expectedReleaseFiles({ version: "0.2.0", final: true })).toEqual(
+      [...MAC_FILES_020, "SHA256SUMS.txt", "latest.json"].sort()
+    );
+  });
+
+  it("includes Windows files only when Windows is requested", () => {
+    expect(expectedReleaseFiles({ version: "0.2.0" }).some((f) => f.includes("setup"))).toBe(false);
+    expect(platformReleaseFiles("windows-x86_64", "0.2.0")).toEqual([
+      "Decks.Bridge_0.2.0_x64-setup.exe",
+      "Decks.Bridge_0.2.0_x64-portable.zip",
+      "Decks.Bridge_0.2.0_x64-setup.nsis.zip",
+      "Decks.Bridge_0.2.0_x64-setup.nsis.zip.sig",
+    ]);
+  });
+
+  it("accepts a complete set", () => {
+    expect(checkReleaseFiles({ dir: releaseDir(MAC_FILES_020), version: "0.2.0" })).toEqual([]);
+    const final = releaseDir([...MAC_FILES_020, "latest.json", "SHA256SUMS.txt"]);
+    expect(checkReleaseFiles({ dir: final, version: "0.2.0", final: true })).toEqual([]);
+  });
+
+  it("checks one architecture on its own, as each build job does", () => {
+    const arm = releaseDir(MAC_FILES_020.filter((f) => f.includes("aarch64")));
+    expect(checkReleaseFiles({ dir: arm, version: "0.2.0", platforms: ["darwin-aarch64"] })).toEqual([]);
+    expect(checkReleaseFiles({ dir: arm, version: "0.2.0", platforms: ["darwin-x86_64"] })).toEqual(
+      expect.arrayContaining(["missing: Decks.Bridge_0.2.0_x64.dmg", "unexpected: Decks.Bridge_0.2.0_aarch64.dmg"])
+    );
+  });
+
+  it("reports every missing file, including a missing architecture or signature", () => {
+    const dir = releaseDir(MAC_FILES_020.filter((f) => !f.includes("_x64") && !f.endsWith("aarch64.app.tar.gz.sig")));
+    expect(checkReleaseFiles({ dir, version: "0.2.0" })).toEqual([
+      "missing: Decks.Bridge_0.2.0_aarch64.app.tar.gz.sig",
+      "missing: Decks.Bridge_0.2.0_x64.app.tar.gz",
+      "missing: Decks.Bridge_0.2.0_x64.app.tar.gz.sig",
+      "missing: Decks.Bridge_0.2.0_x64.app.zip",
+      "missing: Decks.Bridge_0.2.0_x64.dmg",
+    ]);
+  });
+
+  it("reports unexpected files instead of publishing them", () => {
+    const dir = releaseDir([
+      ...MAC_FILES_020,
+      "Decks Bridge.dmg", // an old arch-less name
+      "Decks.Bridge_0.1.9_aarch64.dmg", // another version
+      "Decks.Bridge_0.2.0_x64-setup.exe", // Windows is not part of the release yet
+    ]);
+    expect(checkReleaseFiles({ dir, version: "0.2.0" })).toEqual([
+      "unexpected: Decks Bridge.dmg",
+      "unexpected: Decks.Bridge_0.1.9_aarch64.dmg",
+      "unexpected: Decks.Bridge_0.2.0_x64-setup.exe",
+    ]);
+  });
+
+  it("reports empty files and directories posing as files", () => {
+    const dir = releaseDir(MAC_FILES_020.filter((f) => f !== "Decks.Bridge_0.2.0_x64.dmg"));
+    writeFileSync(join(dir, "Decks.Bridge_0.2.0_aarch64.dmg"), "");
+    mkdirSync(join(dir, "Decks.Bridge_0.2.0_x64.dmg"));
+    expect(checkReleaseFiles({ dir, version: "0.2.0" })).toEqual([
+      "empty: Decks.Bridge_0.2.0_aarch64.dmg",
+      "not a regular file: Decks.Bridge_0.2.0_x64.dmg",
+    ]);
+  });
+
+  it("requires latest.json and SHA256SUMS.txt in the final set", () => {
+    expect(checkReleaseFiles({ dir: releaseDir(MAC_FILES_020), version: "0.2.0", final: true })).toEqual([
+      "missing: SHA256SUMS.txt",
+      "missing: latest.json",
+    ]);
+  });
+
+  it("rejects bad input", () => {
+    expect(() => expectedReleaseFiles({ version: "v0.2.0" })).toThrow(/Invalid release version/);
+    expect(() => parsePlatforms("darwin-aarch64,linux-x86_64")).toThrow(/Unknown platform\(s\): linux-x86_64/);
+    expect(() => parsePlatforms(" , ")).toThrow(/No platforms/);
+    expect(parsePlatforms("darwin-x86_64, darwin-aarch64,darwin-x86_64")).toEqual(["darwin-x86_64", "darwin-aarch64"]);
+    expect(checkReleaseFiles({ dir: join(tempDir(), "absent"), version: "0.2.0" })).toEqual([
+      expect.stringMatching(/is not a directory/),
+    ]);
+  });
+
+  it("matches the names scripts/release-common.sh gives the macOS artifacts", () => {
+    const tags = { "darwin-aarch64": "aarch64", "darwin-x86_64": "x64" };
+    for (const platform of RELEASE_PLATFORMS) {
+      const run = spawnSync(
+        "bash",
+        ["-c", 'source scripts/release-common.sh && mac_release_files "$1" "$2"', "bash", "1.2.3-rc.1", tags[platform]],
+        { cwd: ROOT, encoding: "utf8" }
+      );
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout.trim().split("\n").sort()).toEqual(platformReleaseFiles(platform, "1.2.3-rc.1").sort());
+    }
+  });
+
+  it("works from the command line, where --final takes no value", () => {
+    const cli = (...args) =>
+      spawnSync(process.execPath, ["scripts/release-tools.mjs", ...args], { cwd: ROOT, encoding: "utf8" });
+    const dir = releaseDir([...MAC_FILES_020, "latest.json", "SHA256SUMS.txt"]);
+
+    const ok = cli("check-release-files", "--version", "0.2.0", "--dir", dir, "--final");
+    expect(ok.status, ok.stderr).toBe(0);
+
+    const partial = cli("check-release-files", "--final", "--version", "0.2.0", "--dir", dir, "--platforms", "darwin-aarch64");
+    expect(partial.status).toBe(1);
+    expect(partial.stderr).toMatch(/unexpected: Decks\.Bridge_0\.2\.0_x64\.dmg/);
+  });
+});
+
+describe("release secrets", () => {
+  const API_KEY_SET = { APPLE_API_KEY: "k", APPLE_API_KEY_ID: "id", APPLE_API_ISSUER: "iss" };
+  const APPLE_ID_SET = { APPLE_ID: "a@b.c", APPLE_APP_SPECIFIC_PASSWORD: "p", APPLE_TEAM_ID: "T" };
+  const BASE = {
+    APPLE_CERTIFICATE: "c2VjcmV0LXAxMg==",
+    APPLE_CERTIFICATE_PASSWORD: "cert-pass-value",
+    APPLE_SIGNING_IDENTITY: "Developer ID Application: Example DJ Tools (ABCDE12345)",
+    TAURI_SIGNING_PRIVATE_KEY: "tauri-key-value",
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "tauri-pass-value",
+  };
+
+  it("passes with the Developer ID certificate, updater key, and either notarization option", () => {
+    expect(checkReleaseSecrets({ ...BASE, ...API_KEY_SET })).toEqual([]);
+    expect(checkReleaseSecrets({ ...BASE, ...APPLE_ID_SET })).toEqual([]);
+  });
+
+  it("names every missing secret, treating blank values as missing", () => {
+    const [problem] = checkReleaseSecrets({ ...API_KEY_SET, APPLE_CERTIFICATE: "  ", TAURI_SIGNING_PRIVATE_KEY: "" });
+    expect(problem).toBe(`Missing secrets: ${REQUIRED_SECRETS.join(", ")}.`);
+  });
+
+  it("requires the updater key password", () => {
+    const { TAURI_SIGNING_PRIVATE_KEY_PASSWORD: _omit, ...rest } = BASE;
+    expect(checkReleaseSecrets({ ...rest, ...API_KEY_SET })).toEqual([
+      "Missing secrets: TAURI_SIGNING_PRIVATE_KEY_PASSWORD.",
+    ]);
+  });
+
+  it("requires one complete notarization set, not pieces of both", () => {
+    const problems = checkReleaseSecrets({
+      ...BASE,
+      APPLE_API_KEY: "k",
+      APPLE_API_ISSUER: "iss",
+      APPLE_ID: "a@b.c",
+      APPLE_TEAM_ID: "T",
+    });
+    expect(problems).toEqual([
+      "No complete notarization credentials. Set APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER " +
+        "(missing APPLE_API_KEY_ID), or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID " +
+        "(missing APPLE_APP_SPECIFIC_PASSWORD).",
+    ]);
+    expect(NOTARIZATION_SECRET_SETS.flat()).toHaveLength(6);
+  });
+
+  it("rejects a signing identity that is not Developer ID", () => {
+    for (const identity of ["Decks Bridge Beta Signing", "-", "Apple Development: Someone (ABCDE12345)"]) {
+      expect(checkReleaseSecrets({ ...BASE, ...API_KEY_SET, APPLE_SIGNING_IDENTITY: identity })).toEqual([
+        expect.stringMatching(/must name a "Developer ID Application: …" certificate/),
+      ]);
+    }
+  });
+
+  it("never includes a secret value in its messages", () => {
+    const env = { ...BASE, APPLE_SIGNING_IDENTITY: "Decks Bridge Beta Signing", APPLE_API_KEY: "api-key-value" };
+    const text = checkReleaseSecrets(env).join("\n");
+    for (const value of Object.values(env)) expect(text).not.toContain(value);
+  });
+
+  it("fails from the command line without printing values", () => {
+    const run = spawnSync(process.execPath, ["scripts/release-tools.mjs", "check-secrets"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, ...BASE, APPLE_ID: "someone@example.com" },
+    });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/No complete notarization credentials/);
+    expect(run.stderr).not.toContain("someone@example.com");
+    expect(run.stderr).not.toContain("tauri-key-value");
   });
 });

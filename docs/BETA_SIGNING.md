@@ -66,13 +66,12 @@ import it) or accept that builds from a different Mac have a different identity
 (testers re-grant once). For consistent persistence, always build betas on the
 same Mac.
 
-## Release builds in CI
+## Public releases are different
 
-Tagged releases (`.github/workflows/release.yml`) are built on GitHub's Macs, so
-they need this same identity: export it once as a `.p12` into the
-`MACOS_BETA_SIGNING_P12_BASE64` / `MACOS_BETA_SIGNING_P12_PASSWORD` Actions
-secrets (steps in `RELEASE.md` → One-time setup). `scripts/import-beta-identity.sh`
-imports it into the keychain path above, and `scripts/release-macos.sh` refuses
-to sign if it is missing — it never lets `sign-macos-beta.sh` create a new
-identity for a release, because in-app updates signed by a different identity
-would reset every tester's permissions.
+This identity is for local internal builds only (`npm run build:internal`,
+output under `release/internal/`). Public releases are built by
+`.github/workflows/release.yml` with a **Developer ID Application** certificate
+and are notarized and stapled (`RELEASE.md`); CI never uses the beta identity.
+Because the certificate changes, a tester moving from a beta build to the first
+Developer ID build re-grants Accessibility/Automation once; Developer ID builds
+after that keep the grants.

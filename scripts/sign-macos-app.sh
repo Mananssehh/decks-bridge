@@ -19,7 +19,7 @@ resolve_signing_identity() {
     return
   fi
   security find-identity -v -p codesigning 2>/dev/null \
-    | rg 'Developer ID Application' \
+    | grep 'Developer ID Application' \
     | head -1 \
     | sed -E 's/.*"(Developer ID Application:.*)"/\1/' || true
 }
@@ -73,4 +73,4 @@ rm -rf "$STAGE"
 
 echo "==> Verifying installed signature"
 codesign --verify --deep --strict --verbose=4 "$APP"
-codesign -dv --verbose=4 "$APP" 2>&1 | rg "Authority=|TeamIdentifier=|Signature=|Sealed Resources" || true
+codesign -dv --verbose=4 "$APP" 2>&1 | grep -E "Authority=|TeamIdentifier=|Signature=|Sealed Resources" || true

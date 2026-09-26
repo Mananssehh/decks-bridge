@@ -62,10 +62,12 @@ bash "$ROOT/scripts/sign-macos-app.sh" "$APP"
 echo "==> [5/7] Notarize + staple"
 bash "$ROOT/scripts/notarize-macos-app.sh" "$APP"
 
-echo "==> [6/7] Create DMG / ZIP / updater artifacts (no app modifications after sign)"
+echo "==> [6/7] Create DMG (signed + notarized) / ZIP / updater artifacts (no app modifications after sign)"
 bash "$ROOT/scripts/package-artifacts.sh" "$TARGET"
 
 echo "==> [7/7] Verify release"
-bash "$ROOT/scripts/verify-release.sh" "$APP"
+# The target, not this machine, decides which architecture the artifacts must
+# contain (CI builds the Intel app on an Apple Silicon runner).
+bash "$ROOT/scripts/verify-release.sh" "$APP" "$TARGET"
 
 echo "==> Production release complete: $OUT"

@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/release-common.sh
+source "$ROOT/scripts/release-common.sh"
 
 TARGET="${1:-}"
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
@@ -65,19 +67,16 @@ bash "$ROOT/scripts/sign-macos-beta.sh" "$APP"
 echo "==> [5/6] Package DMG + ZIP"
 mkdir -p "$OUT" "$MAC" "$DIST"
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  arm64) ARCH_TAG="aarch64" ;;
-  x86_64) ARCH_TAG="x64" ;;
-  *) ARCH_TAG="$ARCH" ;;
-esac
+# From the requested target, checked against the built executable; never from
+# `uname -m`, which names this machine rather than the build.
+ARCH_TAG="$(resolve_arch_tag "$TARGET" "$APP")"
 
 # Package from a clean copy (avoids iCloud Desktop xattrs on the source path).
 PACK="$(mktemp -d)"
 ditto --norsrc --noextattr --noqtn "$APP" "$PACK/Decks Bridge.app"
 
 [[ ! -d "$PACK/Decks Bridge.app/.git" ]] || { echo "ERROR: .git in bundle" >&2; exit 1; }
-find "$PACK/Decks Bridge.app" -name '._*' | grep -q . && { echo "ERROR: AppleDouble files" >&2; exit 1; } || true
+[[ -z "$(find "$PACK/Decks Bridge.app" -name '._*' -print -quit)" ]] || { echo "ERROR: AppleDouble files" >&2; exit 1; }
 
 DMG="$MAC/Decks Bridge.dmg"
 ZIP="$MAC/Decks Bridge.zip"
@@ -118,15 +117,17 @@ echo "==> [6/6] Verify packaged artifacts"
 TMP="$(mktemp -d)"
 ditto -x -k "$ZIP" "$TMP"
 codesign --verify --deep --strict --verbose=4 "$TMP/Decks Bridge.app"
-find "$TMP/Decks Bridge.app" -name '._*' | grep -q . && { echo "ERROR: AppleDouble in ZIP" >&2; exit 1; } || true
-xattr -lr "$TMP/Decks Bridge.app" 2>&1 | rg 'quarantine|FinderInfo' && { echo "ERROR: bad xattrs in ZIP" >&2; exit 1; } || true
+[[ -z "$(find "$TMP/Decks Bridge.app" -name '._*' -print -quit)" ]] || { echo "ERROR: AppleDouble in ZIP" >&2; exit 1; }
+if xattr -lr "$TMP/Decks Bridge.app" 2>&1 | grep -E 'quarantine|FinderInfo'; then
+  echo "ERROR: bad xattrs in ZIP" >&2
+  exit 1
+fi
 rm -rf "$TMP"
 
-MOUNT="/Volumes/Decks Bridge"
-hdiutil attach "$DMG" -nobrowse -readonly >/dev/null
-codesign --verify --deep --strict --verbose=4 "$MOUNT/Decks Bridge.app"
-find "$MOUNT/Decks Bridge.app" -name '._*' | grep -q . && { hdiutil detach "$MOUNT" 2>/dev/null; echo "ERROR: AppleDouble in DMG" >&2; exit 1; } || true
-hdiutil detach "$MOUNT" >/dev/null
+MOUNT="$(attach_dmg "$DMG")" || { echo "ERROR: cannot mount $DMG" >&2; exit 1; }
+codesign --verify --deep --strict --verbose=4 "$MOUNT/Decks Bridge.app" || { detach_dmg "$MOUNT"; exit 1; }
+[[ -z "$(find "$MOUNT/Decks Bridge.app" -name '._*' -print -quit)" ]] || { detach_dmg "$MOUNT"; echo "ERROR: AppleDouble in DMG" >&2; exit 1; }
+detach_dmg "$MOUNT"
 
 echo "==> Portability simulation (clean directory + quarantine)"
 SIM="/tmp/decks-bridge-portability-$$"
@@ -137,7 +138,9 @@ ditto -x -k "$ZIP" "$SIM"
 xattr -w com.apple.quarantine "0081;$(date +%s);share;|com.apple.quarantine" "$SIM/Decks Bridge.app"
 SPCTL_OUT="$(spctl -a -vvv "$SIM/Decks Bridge.app" 2>&1)" || true
 echo "$SPCTL_OUT"
-echo "$SPCTL_OUT" | rg -q 'rejected' && echo "NOTE: spctl rejects (expected — self-signed beta build is not notarized)" || true
+if grep -q 'rejected' <<<"$SPCTL_OUT"; then
+  echo "NOTE: spctl rejects (expected — self-signed beta build is not notarized)"
+fi
 xattr -dr com.apple.quarantine "$SIM/Decks Bridge.app"
 codesign --verify --deep --strict "$SIM/Decks Bridge.app"
 echo "OK: App remains valid after quarantine strip; launch may still need Right-click → Open"
@@ -159,7 +162,7 @@ codesign -dv --verbose=4 "$APP_OUT" 2>&1 | grep -E '^Authority=|^Identifier=' ||
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [[ -x "$LSREGISTER" ]]; then
   for stray in "$APP_OUT" "$DIST/Decks Bridge.app" "$MAC/Decks Bridge.app"; do
-    [[ -d "$stray" ]] && "$LSREGISTER" -u "$stray" 2>/dev/null || true
+    if [[ -d "$stray" ]]; then "$LSREGISTER" -u "$stray" 2>/dev/null || true; fi
   done
   echo "OK: deregistered loose build .app copies from LaunchServices (only /Applications should be registered)"
 fi

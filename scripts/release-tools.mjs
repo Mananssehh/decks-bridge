@@ -6,29 +6,105 @@
 //   node scripts/release-tools.mjs bump-version 1.2.3
 //   node scripts/release-tools.mjs release-notes 1.2.3 [--out notes.md]
 //   node scripts/release-tools.mjs verify-signature <file> [<file>.sig]
+//   node scripts/release-tools.mjs check-secrets
+//   node scripts/release-tools.mjs check-release-files --version 1.2.3 --dir dir \
+//        [--platforms darwin-aarch64,darwin-x86_64] [--final]
 //   node scripts/release-tools.mjs latest-json --version 1.2.3 --repo owner/name \
-//        --assets-dir dir --notes-file notes.md [--out dir/latest.json]
+//        --assets-dir dir --notes-file notes.md [--platforms …] [--out dir/latest.json]
 //
 // The only key this script ever reads is the PUBLIC updater key in
 // src-tauri/tauri.conf.json. Signing happens with `tauri signer sign`.
+// check-secrets only reports which secret NAMES are missing, never a value.
 
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * Updater artifacts per platform key in latest.json. The names are what the
- * release workflow uploads (no spaces, so GitHub keeps them verbatim).
- * Keys follow tauri-plugin-updater's `{os}-{arch}` lookup.
+ * The files each platform contributes to a release, keyed by the platform names
+ * tauri-plugin-updater looks up in latest.json (`{os}-{arch}`): downloads for
+ * new installs, and the updater archive (published with its `.sig`). No spaces,
+ * so GitHub keeps the names verbatim. scripts/release-common.sh produces the
+ * macOS names; release-tools.test.mjs checks that the two agree.
  */
-export const UPDATER_ARTIFACTS = [
-  { platform: "darwin-aarch64", asset: (v) => `Decks.Bridge_${v}_aarch64.app.tar.gz` },
-  { platform: "darwin-x86_64", asset: (v) => `Decks.Bridge_${v}_x64.app.tar.gz` },
-  { platform: "windows-x86_64", asset: (v) => `Decks.Bridge_${v}_x64-setup.nsis.zip` },
-];
+export const PLATFORM_FILES = {
+  "darwin-aarch64": {
+    updater: (v) => `Decks.Bridge_${v}_aarch64.app.tar.gz`,
+    downloads: (v) => [`Decks.Bridge_${v}_aarch64.dmg`, `Decks.Bridge_${v}_aarch64.app.zip`],
+  },
+  "darwin-x86_64": {
+    updater: (v) => `Decks.Bridge_${v}_x64.app.tar.gz`,
+    downloads: (v) => [`Decks.Bridge_${v}_x64.dmg`, `Decks.Bridge_${v}_x64.app.zip`],
+  },
+  // Built by scripts/build-release-windows.ps1 but not published yet; see
+  // RELEASE.md → "Enabling Windows releases later".
+  "windows-x86_64": {
+    updater: (v) => `Decks.Bridge_${v}_x64-setup.nsis.zip`,
+    downloads: (v) => [`Decks.Bridge_${v}_x64-setup.exe`, `Decks.Bridge_${v}_x64-portable.zip`],
+  },
+};
+
+/** What a release publishes by default: macOS only (Apple Silicon and Intel). */
+export const RELEASE_PLATFORMS = Object.freeze(["darwin-aarch64", "darwin-x86_64"]);
+
+/** Added to a release after the platform files are complete and verified. */
+export const RELEASE_EXTRA_FILES = Object.freeze(["latest.json", "SHA256SUMS.txt"]);
+
+/** Returns the platforms without duplicates; throws on an empty list or an unknown platform. */
+export function knownPlatforms(platforms) {
+  const unique = [...new Set(platforms)];
+  if (!unique.length) throw new Error("No platforms given.");
+  const unknown = unique.filter((p) => !Object.hasOwn(PLATFORM_FILES, p));
+  if (unknown.length) {
+    throw new Error(
+      `Unknown platform(s): ${unknown.join(", ")}. Known: ${Object.keys(PLATFORM_FILES).join(", ")}.`
+    );
+  }
+  return unique;
+}
+
+/** Parses a --platforms value such as "darwin-aarch64,darwin-x86_64". */
+export function parsePlatforms(list) {
+  return knownPlatforms(String(list ?? "").split(",").map((p) => p.trim()).filter(Boolean));
+}
+
+/** Every file one platform contributes: downloads, updater archive, its signature. */
+export function platformReleaseFiles(platform, version) {
+  const { updater, downloads } = PLATFORM_FILES[knownPlatforms([platform])[0]];
+  return [...downloads(version), updater(version), `${updater(version)}.sig`];
+}
+
+/** The exact file set of a release, sorted. `final` adds latest.json and SHA256SUMS.txt. */
+export function expectedReleaseFiles({ version, platforms = RELEASE_PLATFORMS, final = false }) {
+  if (!parseReleaseVersion(version)) throw new Error(`Invalid release version "${version}".`);
+  const files = knownPlatforms(platforms).flatMap((p) => platformReleaseFiles(p, version));
+  if (final) files.push(...RELEASE_EXTRA_FILES);
+  return files.sort();
+}
+
+/**
+ * Compares `dir` with the exact file set of a release: every expected file
+ * present and non-empty, and nothing else (a stray file would be published
+ * too). Returns the problems found; an empty list means the set is complete.
+ */
+export function checkReleaseFiles({ dir, version, platforms = RELEASE_PLATFORMS, final = false }) {
+  const expected = expectedReleaseFiles({ version, platforms, final });
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [`${dir} is not a directory.`];
+  const problems = [];
+  for (const name of expected) {
+    const file = join(dir, name);
+    if (!existsSync(file)) problems.push(`missing: ${name}`);
+    else if (!statSync(file).isFile()) problems.push(`not a regular file: ${name}`);
+    else if (statSync(file).size === 0) problems.push(`empty: ${name}`);
+  }
+  for (const name of readdirSync(dir).sort()) {
+    if (!expected.includes(name)) problems.push(`unexpected: ${name}`);
+  }
+  return problems;
+}
 
 // ── Versions ──────────────────────────────────────────────────────────────────
 
@@ -281,20 +357,29 @@ export function rfc3339(date) {
 }
 
 /**
- * Builds the static updater manifest for a release. Every platform's artifact
- * and signature must be present in `assetsDir`, and every signature must
- * verify against the app's public key — so a release that installed apps could
- * not accept is never published.
+ * Builds the static updater manifest for a release. Every listed platform's
+ * artifact and signature must be present in `assetsDir`, and every signature
+ * must verify against the app's public key — so a release that installed apps
+ * could not accept is never published. Only `platforms` are listed: an
+ * installed app on any other platform finds no entry and is not offered it.
  */
-export function buildLatestJson({ version, repo, notes, assetsDir, pubkey, pubDate = new Date() }) {
+export function buildLatestJson({
+  version,
+  repo,
+  notes,
+  assetsDir,
+  pubkey,
+  pubDate = new Date(),
+  platforms: releasePlatforms = RELEASE_PLATFORMS,
+}) {
   if (!parseReleaseVersion(version)) throw new Error(`Invalid release version "${version}".`);
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) throw new Error(`Invalid repository "${repo}".`);
   const tag = `v${version}`;
   const platforms = {};
   const missing = [];
 
-  for (const { platform, asset } of UPDATER_ARTIFACTS) {
-    const name = asset(version);
+  for (const platform of knownPlatforms(releasePlatforms)) {
+    const name = PLATFORM_FILES[platform].updater(version);
     const file = join(assetsDir, name);
     if (!existsSync(file) || !existsSync(`${file}.sig`)) {
       missing.push(`${name} (+ .sig)`);
@@ -316,14 +401,63 @@ export function buildLatestJson({ version, repo, notes, assetsDir, pubkey, pubDa
   return { version, notes, pub_date: rfc3339(pubDate), platforms };
 }
 
+// ── Release secrets ───────────────────────────────────────────────────────────
+
+/** Actions secrets every release needs (RELEASE.md → Secrets). */
+export const REQUIRED_SECRETS = Object.freeze([
+  "APPLE_CERTIFICATE",
+  "APPLE_CERTIFICATE_PASSWORD",
+  "APPLE_SIGNING_IDENTITY",
+  "TAURI_SIGNING_PRIVATE_KEY",
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+]);
+
+/** Notarization needs one complete set: an App Store Connect API key, or an Apple ID. */
+export const NOTARIZATION_SECRET_SETS = Object.freeze([
+  Object.freeze(["APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]),
+  Object.freeze(["APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]),
+]);
+
+/** Every secret name the release workflow may read. */
+export const RELEASE_SECRET_NAMES = Object.freeze([...REQUIRED_SECRETS, ...NOTARIZATION_SECRET_SETS.flat()]);
+
+/**
+ * Checks that the release secrets are configured, from their environment
+ * variables. Problems name secrets only; values are never included.
+ */
+export function checkReleaseSecrets(env) {
+  const has = (name) => typeof env[name] === "string" && env[name].trim() !== "";
+  const problems = [];
+  const missing = REQUIRED_SECRETS.filter((name) => !has(name));
+  if (missing.length) problems.push(`Missing secrets: ${missing.join(", ")}.`);
+  if (!NOTARIZATION_SECRET_SETS.some((set) => set.every(has))) {
+    const options = NOTARIZATION_SECRET_SETS.map((set) => {
+      const absent = set.filter((name) => !has(name));
+      return `${set.join(" + ")} (missing ${absent.join(", ")})`;
+    });
+    problems.push(`No complete notarization credentials. Set ${options.join(", or ")}.`);
+  }
+  if (has("APPLE_SIGNING_IDENTITY") && !env.APPLE_SIGNING_IDENTITY.trim().startsWith("Developer ID Application: ")) {
+    problems.push(
+      'APPLE_SIGNING_IDENTITY must name a "Developer ID Application: …" certificate; ' +
+        "Gatekeeper rejects anything else in a downloaded app."
+    );
+  }
+  return problems;
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
+
+const BOOLEAN_FLAGS = new Set(["final"]);
 
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg.startsWith("--")) {
+    if (arg.startsWith("--") && BOOLEAN_FLAGS.has(arg.slice(2))) {
+      flags[arg.slice(2)] = true;
+    } else if (arg.startsWith("--")) {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--")) throw new Error(`${arg} needs a value.`);
       flags[arg.slice(2)] = value;
@@ -369,6 +503,23 @@ const COMMANDS = {
     });
     console.error(`OK: ${file} is signed by updater key ${result.keyId}.`);
   },
+  "check-secrets"() {
+    const problems = checkReleaseSecrets(process.env);
+    if (problems.length) {
+      throw new Error(`${problems.join("\n")}\nSee RELEASE.md → Secrets. Nothing was built or published.`);
+    }
+    console.error("All release secrets are configured.");
+  },
+  "check-release-files"({ flags }) {
+    const version = required(flags.version, "--version");
+    const dir = required(flags.dir, "--dir");
+    const platforms = flags.platforms ? parsePlatforms(flags.platforms) : RELEASE_PLATFORMS;
+    const problems = checkReleaseFiles({ dir, version, platforms, final: flags.final === true });
+    if (problems.length) {
+      throw new Error(`${dir} is not a complete ${version} release for ${platforms.join(", ")}:\n  ${problems.join("\n  ")}`);
+    }
+    console.error(`${dir}: complete ${version} release for ${platforms.join(", ")}${flags.final ? " (final)" : ""}.`);
+  },
   "latest-json"({ flags }) {
     const manifest = buildLatestJson({
       version: required(flags.version, "--version"),
@@ -376,6 +527,7 @@ const COMMANDS = {
       assetsDir: required(flags["assets-dir"], "--assets-dir"),
       notes: readFileSync(required(flags["notes-file"], "--notes-file"), "utf8").trim(),
       pubkey: readUpdaterPublicKey(),
+      platforms: flags.platforms ? parsePlatforms(flags.platforms) : RELEASE_PLATFORMS,
     });
     const json = `${JSON.stringify(manifest, null, 2)}\n`;
     if (flags.out) writeFileSync(flags.out, json);
@@ -387,7 +539,7 @@ const COMMANDS = {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [command, ...rest] = process.argv.slice(2);
   try {
-    const run = COMMANDS[command];
+    const run = Object.hasOwn(COMMANDS, command ?? "") ? COMMANDS[command] : undefined;
     if (!run) throw new Error(`Usage: release-tools.mjs <${Object.keys(COMMANDS).join("|")}> …`);
     run(parseArgs(rest));
   } catch (err) {
