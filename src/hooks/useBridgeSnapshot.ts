@@ -204,7 +204,7 @@ export function useBridgeSnapshot(
     timerRef.current = setTimeout(() => {
       void poll();
     }, delay);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [poll]);
 
   // Manual/immediate refresh (Sync Now, reconnect, foreground, pairing).

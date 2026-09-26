@@ -39,3 +39,10 @@ release-build.log
 .vscode/
 .idea/
 *.swp
+
+# ── Machine-local tooling config ──────────────────────────────────────────────
+# Per-machine Claude Code state (absolute home paths, local permission grants).
+# Not project config, so it should not be shared. The glob also catches Finder
+# duplicates like "settings.local 2.json", which is how one slipped in.
+.claude/settings.local*.json
+.claude/scheduled_tasks.lock

@@ -7,9 +7,18 @@ cd "$ROOT"
 
 TARGET="${1:-}"
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-OUT="$ROOT/release/v${VERSION}-internal/mac"
-MAC="$ROOT/release/mac"
-DIST="$ROOT/decks bridge Mac"
+# Internal outputs live UNDER release/internal/ ONLY. They must never share a
+# path with public release artifacts (release/mac, release/v<ver>/mac): the CI
+# publish step globs those, so an internal ad-hoc build written there would be
+# uploaded to a GitHub Release and reach users as a "damaged" download. Keeping
+# internal artifacts in their own tree makes that collision impossible.
+OUT="$ROOT/release/internal/v${VERSION}/mac"
+MAC="$ROOT/release/internal/mac"
+# Internal builds stay ENTIRELY under release/internal/. They must never land in
+# "decks bridge Mac" or any other shareable folder: those look distributable, and
+# an internal build is ad-hoc/self-signed and Gatekeeper-rejected. Testers of an
+# internal build take it from release/internal/ knowingly.
+DIST="$ROOT/release/internal/testers-mac"
 
 # Build to a LOCAL (non-iCloud) target dir by default. The in-project
 # src-tauri/target lives under the iCloud-synced Desktop, where cargo's
@@ -101,7 +110,9 @@ cp "$ZIP" "$OUT/Decks.Bridge_${VERSION}_${ARCH_TAG}.app.zip"
 cp "$DMG" "$DIST/Decks Bridge.dmg"
 cp "$ZIP" "$DIST/Decks Bridge.zip"
 cp TEST_INSTALL.md "$DIST/"
-bash "$ROOT/scripts/sync-tester-folders.sh"
+# Deliberately NOT calling sync-tester-folders.sh here: that populates the
+# shareable "decks bridge Mac" folder, and this is an unsigned internal build.
+# sync-tester-folders.sh now refuses non-notarized builds anyway.
 
 echo "==> [6/6] Verify packaged artifacts"
 TMP="$(mktemp -d)"

@@ -15,7 +15,14 @@ export function loadSettings(): AppSettings {
 }
 
 export function saveSettings(settings: AppSettings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  // Guarded like loadSettings: this is called from a .then() during mount, so
+  // a full-disk / disabled-storage throw would surface as an unhandled
+  // rejection. A settings write failing is never worth breaking startup over.
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (err) {
+    console.warn("[platform] saveSettings failed (non-fatal):", err);
+  }
 }
 
 export function isWindows(): boolean {
