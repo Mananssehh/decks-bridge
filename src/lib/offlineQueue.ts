@@ -26,7 +26,27 @@ function readQueue(): QueuedTrack[] {
 }
 
 function writeQueue(items: QueuedTrack[]): void {
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(items.slice(-MAX_QUEUE)));
+  const capped = items.slice(-MAX_QUEUE);
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(capped));
+  } catch (err) {
+    // Storage full or disabled. Throwing here would escape through the sync
+    // engine's send path as an unhandled rejection, so shed the oldest half and
+    // retry once instead. Losing the oldest entries beats losing the queue —
+    // and during a live set the newest tracks are the ones that still matter.
+    try {
+      const half = capped.slice(Math.floor(capped.length / 2));
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(half));
+      void logDiagnostic(
+        "offline",
+        `queue storage full — dropped ${capped.length - half.length} oldest entries`
+      ).catch(() => undefined);
+    } catch {
+      void logDiagnostic("offline", `queue storage unavailable: ${String(err)}`).catch(
+        () => undefined
+      );
+    }
+  }
 }
 
 export function getQueueLength(): number {
@@ -36,7 +56,14 @@ export function getQueueLength(): number {
 export function enqueueTrack(track: TrackPayload, source = "decks_bridge"): void {
   const queue = readQueue();
   const key = `${track.title}||${track.artist}`;
-  if (queue.some((q) => `${q.track.title}||${q.track.artist}` === key)) return;
+
+  // Dedupe against the MOST RECENT entry only. The 3s detector re-offers the
+  // same track every tick while offline, which must not spam the queue — but a
+  // DJ genuinely replaying a track later in the set is real history. Comparing
+  // against the whole queue silently dropped those replays and left the event
+  // showing the wrong final track once the queue flushed.
+  const last = queue[queue.length - 1];
+  if (last && `${last.track.title}||${last.track.artist}` === key) return;
 
   queue.push({
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -57,19 +84,27 @@ export async function flushOfflineQueue(config: Config): Promise<number> {
   const remaining: QueuedTrack[] = [];
   let sent = 0;
 
-  for (const item of queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
     const result = await sendNowPlaying(config, item.track, item.source);
+
     if (result.ok) {
       sent++;
-    } else if (result.httpStatus === 0) {
-      remaining.push(item);
-      break;
-    } else if (result.httpStatus === 401 || result.httpStatus === 403) {
-      remaining.push(...queue.slice(queue.indexOf(item)));
-      break;
-    } else {
-      remaining.push(item);
+      continue;
     }
+
+    // Network down or auth rejected: stop flushing and KEEP this item plus
+    // everything after it. Retrying the rest now would fail the same way, and
+    // dropping them would silently destroy the DJ's set history — the whole
+    // reason the queue exists. queue.slice(i) is the untried remainder.
+    if (result.httpStatus === 0 || result.httpStatus === 401 || result.httpStatus === 403) {
+      remaining.push(...queue.slice(i));
+      break;
+    }
+
+    // Any other error (4xx/5xx on this specific track): keep it for a later
+    // attempt but carry on — the next track may well succeed.
+    remaining.push(item);
   }
 
   writeQueue(remaining);

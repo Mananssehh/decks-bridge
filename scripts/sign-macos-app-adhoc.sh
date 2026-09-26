@@ -19,7 +19,7 @@ xattr -d com.apple.fileprovider.fpfs#P "$APP" 2>/dev/null || true
 if codesign --verify --deep --strict "$APP" 2>/dev/null \
    && codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q "com.apple.security.automation.apple-events"; then
   echo "==> Already validly ad-hoc signed with automation entitlement: $APP"
-  codesign -dv --verbose=4 "$APP" 2>&1 | rg "Signature=|TeamIdentifier=|Sealed Resources" || true
+  codesign -dv --verbose=4 "$APP" 2>&1 | grep -E "Signature=|TeamIdentifier=|Sealed Resources" || true
   exit 0
 fi
 
@@ -49,4 +49,4 @@ rm -rf "$STAGE"
 
 echo "==> Verifying installed signature"
 codesign --verify --deep --strict --verbose=4 "$APP"
-codesign -dv --verbose=4 "$APP" 2>&1 | rg "Signature=|TeamIdentifier=|Sealed Resources" || true
+codesign -dv --verbose=4 "$APP" 2>&1 | grep -E "Signature=|TeamIdentifier=|Sealed Resources" || true

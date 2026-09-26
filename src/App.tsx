@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import PairingScreen from "./components/PairingScreen";
 import SetupScreen from "./components/SetupScreen";
 import NowPlaying from "./components/NowPlaying";
+import UpdateAlert from "./components/UpdateAlert";
+import { appUpdater } from "./hooks/useAppUpdate";
 import { loadConfig, clearConfig, resetAndReload, type Config } from "./lib/store";
 import { CrashScreen } from "./main";
 
@@ -35,7 +37,6 @@ function LoadingScreen({ timedOut }: { timedOut: boolean }) {
 export default function App() {
   const [config, setConfig]     = useState<Config | null>(null);
   const [screen, setScreen]     = useState<Screen>("pairing");
-  const [autoStart, setAutoStart] = useState(false);
   const [ready, setReady]       = useState(false);
   const [timedOut, setTimedOut] = useState(false);
   const [safeMode, setSafeMode] = useState(false);
@@ -54,6 +55,14 @@ export default function App() {
       })
       .catch((err) => console.error("[app] viewer host init failed:", err));
     return () => un?.();
+  }, []);
+
+  // ── Update checks ──────────────────────────────────────────────────────────
+  // App renders only in the main window, so exactly one window checks for
+  // updates: shortly after launch, then periodically while the app is open.
+  useEffect(() => {
+    appUpdater.start();
+    return () => appUpdater.stop();
   }, []);
 
   // ── Startup ──────────────────────────────────────────────────────────────
@@ -79,14 +88,12 @@ export default function App() {
     }, STARTUP_TIMEOUT_MS);
 
     // ── 2. Safe mode check (previous crash) ──────────────────────────────
-    let isSafeMode = false;
     try {
       const lastError = localStorage.getItem(CRASH_LOG_KEY);
       const requestedSafe = localStorage.getItem(SAFE_MODE_KEY);
       if (lastError || requestedSafe) {
         const parsed = lastError ? JSON.parse(lastError) : null;
         console.warn("[app] previous crash detected — entering safe mode:", parsed?.message ?? "unknown");
-        isSafeMode = true;
         setSafeMode(true);
         // Clear the crash log so safe mode only fires once.
         localStorage.removeItem(CRASH_LOG_KEY);
@@ -117,11 +124,8 @@ export default function App() {
       console.log("[app] route → pairing");
     }
 
-    // ── 5. Safe mode overrides ────────────────────────────────────────────
-    if (isSafeMode) {
-      console.log("[app] safe mode: autoStart disabled, MediaRemote polling disabled");
-      // autoStart stays false — NowPlaying won't begin polling automatically.
-    }
+    // Safe mode is passed to NowPlaying, which starts in manual (no detection)
+    // so a crash loop can't repeat. The DJ turns detection back on when ready.
 
     readyRef.current = true;
     clearTimeout(timeoutHandle);
@@ -146,6 +150,7 @@ export default function App() {
   const shell = (children: React.ReactNode) => (
     <div style={{ background: "#0e0e10", color: "#f0f0f0", minHeight: "100vh" }}>
       {children}
+      <UpdateAlert />
     </div>
   );
 
@@ -156,13 +161,11 @@ export default function App() {
       <>
         <NowPlaying
           config={config}
-          autoStart={autoStart && !safeMode}
           safeMode={safeMode}
           onReset={() => {
             console.log("[app] reset → pairing");
             clearConfig();
             setConfig(null);
-            setAutoStart(false);
             setSafeMode(false);
             setScreen("pairing");
           }}
@@ -177,7 +180,6 @@ export default function App() {
         onSave={(cfg) => {
           console.log("[app] manual setup → now-playing");
           setConfig(cfg);
-          setAutoStart(false);
           setScreen("now-playing");
         }}
         onBack={() => setScreen("pairing")}
@@ -190,7 +192,6 @@ export default function App() {
       onPaired={(cfg) => {
         console.log("[app] paired → now-playing, eventId:", cfg.eventId);
         setConfig(cfg);
-        setAutoStart(true);
         setSafeMode(false);
         setScreen("now-playing");
       }}

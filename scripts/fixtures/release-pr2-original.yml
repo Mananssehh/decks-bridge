@@ -1,0 +1,320 @@
+# Fixture for scripts/release-policy.test.mjs, not a workflow: PR #2's release.yml
+# before reconciliation. It must FAIL the release policy (self-signed, unnotarized
+# macOS path, beta-identity secrets, Windows job).
+name: Release
+
+# Publishes a Decks Bridge release — and with it the in-app update — ONLY when a
+# version tag is pushed. Pushes and merges to main never publish anything:
+# installed apps read latest.json from the newest *published, non-pre-release*
+# GitHub Release, and only the `publish` job below creates releases.
+#
+#   1. npm run release:version -- 1.2.3        (sets every version file)
+#   2. Add "## [1.2.3] - YYYY-MM-DD" to CHANGELOG.md (DJs see this text)
+#   3. Merge to main, then: git tag v1.2.3 && git push origin v1.2.3
+#
+# Tags like v1.2.3-rc.1 publish a GitHub *pre-release*, which installed apps
+# ignore — use them to test the pipeline. "Run workflow" (workflow_dispatch)
+# builds and verifies everything but never publishes.
+# One-time setup, secrets and limitations: RELEASE.md.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Version, notes and secrets
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The tag must name the version the app reports at runtime, or installed
+      # apps would be offered the same "update" again after installing it.
+      - name: Tag matches the app version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            node scripts/release-tools.mjs check-version --tag "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            node scripts/release-tools.mjs check-version >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stable releases come from main
+        if: github.ref_type == 'tag' && steps.version.outputs.prerelease == 'false'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main. Merge the release to main first, then tag that commit."
+            exit 1
+          fi
+
+      - name: Release notes exist in CHANGELOG.md
+        run: node scripts/release-tools.mjs release-notes "${{ steps.version.outputs.version }}" --out release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+      - name: Signing secrets are configured
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MACOS_BETA_SIGNING_P12_BASE64: ${{ secrets.MACOS_BETA_SIGNING_P12_BASE64 }}
+          MACOS_BETA_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_BETA_SIGNING_P12_PASSWORD }}
+        run: |
+          missing=()
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+                      MACOS_BETA_SIGNING_P12_BASE64 MACOS_BETA_SIGNING_P12_PASSWORD; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing Actions secrets: ${missing[*]}. See RELEASE.md → One-time setup."
+            exit 1
+          fi
+          echo "All signing secrets are present."
+
+  verify:
+    name: Tests and build checks
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Linux libraries for the Rust tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --bin decks-bridge
+
+  build-macos:
+    name: macOS (${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - run: npm ci
+
+      # Each secret is only visible to the one step that needs it; the build
+      # itself (which runs npm scripts) never sees a signing secret.
+      - name: Build app
+        run: bash scripts/release-macos.sh build ${{ matrix.target }}
+
+      - name: Import the stable beta signing identity
+        env:
+          MACOS_BETA_SIGNING_P12_BASE64: ${{ secrets.MACOS_BETA_SIGNING_P12_BASE64 }}
+          MACOS_BETA_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_BETA_SIGNING_P12_PASSWORD }}
+        run: bash scripts/import-beta-identity.sh
+
+      - name: Sign and package (self-signed, not notarized)
+        run: bash scripts/release-macos.sh package ${{ matrix.target }}
+
+      - name: Sign the updater archive
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/release-macos.sh sign-updater ${{ matrix.target }}
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$HOME/Library/Keychains/decks-bridge-beta.keychain-db" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: release/upload/
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows (x64)
+    needs: prepare
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: npm ci
+
+      # Authenticode is optional, exactly as before: without WINDOWS_SIGNING_CERT
+      # the installer is unsigned and SmartScreen warns on first install.
+      - name: Build installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_SIGNING_CERT) {
+            $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT))
+            $env:WINDOWS_SIGNING_CERT = $certPath
+          } else {
+            Write-Host "No WINDOWS_SIGNING_CERT: the installer is not Authenticode-signed."
+          }
+          npm run build:release:windows
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $src = "release/v$env:VERSION/windows"
+          $out = "release/upload"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "$src/Decks Bridge_$($env:VERSION)_x64-setup.exe" "$out/Decks.Bridge_$($env:VERSION)_x64-setup.exe"
+          Copy-Item "$src/Decks Bridge_$($env:VERSION)_x64-setup.nsis.zip" "$out/Decks.Bridge_$($env:VERSION)_x64-setup.nsis.zip"
+          Copy-Item "$src/Decks.Bridge_$($env:VERSION)_x64.zip" "$out/Decks.Bridge_$($env:VERSION)_x64-portable.zip"
+          Get-ChildItem $out
+
+      - name: Sign the updater archive
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $zip = "release/upload/Decks.Bridge_$($env:VERSION)_x64-setup.nsis.zip"
+          npx tauri signer sign $zip | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/release-tools.mjs verify-signature $zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: release/upload/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, verify, build-macos, build-windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # latest.json lists every platform, and every signature is verified
+      # against the public key the installed apps trust before anything is
+      # uploaded.
+      - name: Assemble release files and latest.json
+        run: |
+          set -euo pipefail
+          mkdir -p release-upload
+          cp artifacts/macos-aarch64/* artifacts/macos-x64/* artifacts/windows-x64/* release-upload/
+          node scripts/release-tools.mjs latest-json \
+            --version "$VERSION" --repo "$GITHUB_REPOSITORY" --assets-dir release-upload \
+            --notes-file artifacts/release-notes/release-notes.md --out release-upload/latest.json
+          (cd release-upload && sha256sum -- * > SHA256SUMS.txt)
+          ls -la release-upload
+
+      # Upload everything to a draft first: installed apps only see a release
+      # once it is published, so they never find a half-uploaded one.
+      - name: Create draft release
+        run: |
+          set -euo pipefail
+          if is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::error::Release $TAG is already published. Published releases are never replaced; tag a new version."
+              exit 1
+            fi
+            echo "Replacing the unpublished draft left by an earlier attempt."
+            gh release delete "$TAG" --yes
+          fi
+          flags=(--draft --verify-tag --title "Decks Bridge $VERSION" --notes-file artifacts/release-notes/release-notes.md)
+          if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" release-upload/*
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
+          echo "Published $TAG."

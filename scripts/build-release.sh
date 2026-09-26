@@ -26,6 +26,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 
+# [0/7] Fail-closed preflight. A release that cannot be signed + notarized must
+# abort HERE, before we build — not silently produce an ad-hoc bundle that
+# Gatekeeper reports as "damaged" on every user's Mac. This is the guardrail
+# that the previous pipeline was missing.
+echo "==> [0/7] Signing preflight"
+bash "$ROOT/scripts/preflight-signing.sh"
+
 BUILD_ARGS=()
 if [[ -n "$TARGET" ]]; then
   BUILD_ARGS+=(--target "$TARGET")
@@ -55,10 +62,12 @@ bash "$ROOT/scripts/sign-macos-app.sh" "$APP"
 echo "==> [5/7] Notarize + staple"
 bash "$ROOT/scripts/notarize-macos-app.sh" "$APP"
 
-echo "==> [6/7] Create DMG / ZIP / updater artifacts (no app modifications after sign)"
+echo "==> [6/7] Create DMG (signed + notarized) / ZIP / updater artifacts (no app modifications after sign)"
 bash "$ROOT/scripts/package-artifacts.sh" "$TARGET"
 
 echo "==> [7/7] Verify release"
-bash "$ROOT/scripts/verify-release.sh" "$APP"
+# The target, not this machine, decides which architecture the artifacts must
+# contain (CI builds the Intel app on an Apple Silicon runner).
+bash "$ROOT/scripts/verify-release.sh" "$APP" "$TARGET"
 
 echo "==> Production release complete: $OUT"

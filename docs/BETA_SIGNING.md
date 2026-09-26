@@ -65,3 +65,13 @@ Mac, either copy the same identity over (export the cert+key as `.p12` and
 import it) or accept that builds from a different Mac have a different identity
 (testers re-grant once). For consistent persistence, always build betas on the
 same Mac.
+
+## Public releases are different
+
+This identity is for local internal builds only (`npm run build:internal`,
+output under `release/internal/`). Public releases are built by
+`.github/workflows/release.yml` with a **Developer ID Application** certificate
+and are notarized and stapled (`RELEASE.md`); CI never uses the beta identity.
+Because the certificate changes, a tester moving from a beta build to the first
+Developer ID build re-grants Accessibility/Automation once; Developer ID builds
+after that keep the grants.
